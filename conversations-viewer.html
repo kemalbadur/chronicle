@@ -192,14 +192,14 @@
 <div id="landing">
   <div class="landing-card" id="drop">
     <h1>Claude Conversation Viewer</h1>
-    <p class="sub">Browse and search your exported Claude history — threaded, with Markdown.</p>
+    <p class="sub">Browse and search your exported Claude or ChatGPT history — threaded, with Markdown.</p>
     <p class="trust"><b>This runs on your computer and cannot upload your chats.</b>
       The page is configured to block every network connection, so your export
       stays on your device — nothing is sent to us, to your institution, or to anyone.</p>
     <label class="filebtn">Choose export…
       <input type="file" id="file" accept=".json,.zip" hidden />
     </label>
-    <p class="hint">or drag your <code>conversations.json</code> or the export <code>.zip</code> here</p>
+    <p class="hint">or drag your Claude or ChatGPT export <code>.zip</code> (or a <code>conversations.json</code>) here</p>
     <p class="alt">Have a <code>projects</code> folder?
       <label class="linkbtn">Load projects folder…
         <input type="file" id="projfile" webkitdirectory multiple hidden />
@@ -271,6 +271,8 @@ const ROOT_PARENT = "00000000-0000-4000-8000-000000000000";
 let activeUuid = null;
 let currentView = "chats";   // "chats" | "projects"
 let currentTerms = [];       // active search terms, for lazy doc highlighting
+let currentSource = "claude"; // "claude" | "chatgpt" — set when a chat is opened
+const assistantLabel = (src) => src === "chatgpt" ? "ChatGPT" : "Claude";
 
 // One-time overview banner: shown atop conversations until dismissed.
 let bannerDismissed = (() => { try { return localStorage.getItem("rawBannerDismissed") === "1"; } catch (e) { return false; } })();
@@ -404,6 +406,7 @@ function ingest(data) {
       created_at: conv.created_at || "",
       updated_at: conv.updated_at || "",
       message_count: msgs.length,
+      source: conv.source || "claude",
       _msgs: msgs,
     };
     STORE.conversations.push(c);
@@ -463,6 +466,119 @@ function indexArtifacts() {
     e.mode = pickMode(e.type, e.kind === "file" ? e.title : "", e.text);
     e._lc = (e.title + "\n" + e.type + "\n" + e.convName + "\n" + e.text).toLowerCase();
   }
+}
+
+// ---- ChatGPT export support ----
+// A ChatGPT export is an array of conversations, each with a `mapping` tree
+// (node id -> {id, message, parent}). We normalize it into the same shape
+// ingest() consumes for Claude, so all threading/search/rendering is reused.
+function looksLikeChatGPT(arr) {
+  return Array.isArray(arr) && arr.some(c => c && typeof c === "object" && c.mapping && typeof c.mapping === "object");
+}
+function gptIso(t) {
+  // ChatGPT timestamps are unix seconds (floats); some are already strings.
+  if (!t) return "";
+  if (typeof t === "string") return t;
+  return new Date(t * 1000).toISOString();
+}
+// Turn one ChatGPT message's content into Claude-style content blocks + image refs.
+function gptBlocks(content) {
+  const blocks = [], images = [];
+  if (!content) return { blocks, images };
+  const ct = content.content_type;
+  const strParts = (content.parts || []).filter(p => typeof p === "string").join("\n\n");
+  if (ct === "text") {
+    if (strParts.trim()) blocks.push({ type: "text", text: strParts });
+  } else if (ct === "multimodal_text") {
+    const txt = [];
+    for (const p of (content.parts || [])) {
+      if (typeof p === "string") txt.push(p);
+      else if (p && p.content_type === "image_asset_pointer") images.push(p);
+    }
+    if (txt.join("\n\n").trim()) blocks.push({ type: "text", text: txt.join("\n\n") });
+  } else if (ct === "code") {
+    const lang = content.language && content.language !== "unknown" ? content.language : "";
+    if ((content.text || "").trim()) blocks.push({ type: "text", text: "```" + lang + "\n" + content.text + "\n```" });
+  } else if (ct === "execution_output") {
+    if ((content.text || "").trim()) blocks.push({ type: "text", text: "```\n" + content.text + "\n```" });
+  } else if (ct === "thoughts") {
+    const t = (content.thoughts || []).map(x => (x.summary ? "**" + x.summary + "**\n" : "") + (x.content || "")).join("\n\n");
+    if ((t || strParts).trim()) blocks.push({ type: "thinking", text: t || strParts });
+  } else if (ct === "reasoning_recap") {
+    if ((content.content || "").trim()) blocks.push({ type: "thinking", text: content.content });
+  } else if (strParts.trim()) {
+    blocks.push({ type: "text", text: strParts });
+  } else if ((content.text || "").trim()) {
+    blocks.push({ type: "text", text: content.text });
+  }
+  return { blocks, images };
+}
+// Walk up the parent chain to the nearest node we actually kept.
+function gptNearestKept(mapping, parentId, kept) {
+  let pid = parentId;
+  while (pid) {
+    const node = mapping[pid];
+    if (!node) return null;
+    if (kept.has(pid)) return pid;
+    pid = node.parent;
+  }
+  return null;
+}
+function chatgptToClaude(arr) {
+  const out = [];
+  for (const conv of arr) {
+    const mapping = conv.mapping || {};
+    const nodes = Object.values(mapping);
+    // Pass 1: decide which nodes become messages (skip system + hidden + empty).
+    const kept = new Set();
+    const built = new Map();
+    for (const nd of nodes) {
+      const m = nd.message;
+      if (!m || !m.author) continue;
+      if (m.author.role === "system") continue;
+      if (m.metadata && m.metadata.is_visually_hidden_from_conversation) continue;
+      const { blocks, images } = gptBlocks(m.content);
+      if (!blocks.length && !images.length) continue;
+      kept.add(nd.id);
+      built.set(nd.id, { m, blocks, images });
+    }
+    // Pass 2: emit messages, rewiring parents to the nearest kept ancestor.
+    const msgs = [];
+    for (const id of kept) {
+      const { m, blocks, images } = built.get(id);
+      const parent = gptNearestKept(mapping, mapping[id].parent, kept) || ROOT_PARENT;
+      msgs.push({
+        uuid: id,
+        sender: m.author.role === "user" ? "human" : "assistant",
+        parent_message_uuid: parent,
+        created_at: gptIso(m.create_time),
+        content: blocks,
+        files: images.map(() => ({ file_name: "image (ChatGPT attachment — not included)" })),
+      });
+    }
+    if (!msgs.length) continue;
+    msgs.sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
+    // ChatGPT sometimes stamps a conversation's top-level create/update time with
+    // the *export* date rather than the real one (seen on some pre-2024 chats).
+    // The per-message timestamps are reliable, so derive the conversation dates
+    // from them; fall back to the conversation-level fields only when no message
+    // carries a timestamp.
+    const stamps = msgs.map(m => m.created_at).filter(Boolean);
+    out.push({
+      uuid: conv.conversation_id || conv.id || ("gpt-" + out.length),
+      name: conv.title || "(untitled)",
+      created_at: stamps[0] || gptIso(conv.create_time),
+      updated_at: stamps[stamps.length - 1] || gptIso(conv.update_time),
+      source: "chatgpt",
+      chat_messages: msgs,
+    });
+  }
+  return out;
+}
+// Detect the export format and ingest accordingly.
+function ingestAny(data) {
+  if (looksLikeChatGPT(data)) ingest(chatgptToClaude(data));
+  else ingest(data);
 }
 
 function computeStats() {
@@ -975,7 +1091,7 @@ function copyText(text, btn) {
 }
 
 function renderBubble(node) {
-  const who = node.sender === "human" ? "You" : "Claude";
+  const who = node.sender === "human" ? "You" : assistantLabel(currentSource);
   const cls = node.sender === "human" ? "human" : "assistant";
 
   let uploads = "";
@@ -1069,9 +1185,10 @@ function fenceFor(text) {
 // Messages in seq order (chronological). Branched chats are flattened to a
 // linear transcript, which is what you want for an export/copy.
 function chatToMarkdown(c) {
+  const bot = assistantLabel(c.source);
   const out = [`# ${c.name}`, "", `*${fmtDate(c.created_at)} → ${fmtDate(c.updated_at)} · ${c.message_count} messages*`, ""];
   for (const m of c._msgs) {
-    const who = m.sender === "human" ? "You" : "Claude";
+    const who = m.sender === "human" ? "You" : bot;
     out.push(`## ${who}${m.created_at ? " — " + fmtTime(m.created_at) : ""}`, "");
     for (const u of (m.uploads || [])) {
       if (u.content) { const f = fenceFor(u.content); out.push(`**📎 Uploaded: ${u.name}**`, "", f, u.content, f, ""); }
@@ -1091,9 +1208,10 @@ function chatToMarkdown(c) {
   return out.join("\n");
 }
 function chatToText(c) {
+  const bot = assistantLabel(c.source);
   const out = [c.name, `${fmtDate(c.created_at)} → ${fmtDate(c.updated_at)} · ${c.message_count} messages`, ""];
   for (const m of c._msgs) {
-    const who = m.sender === "human" ? "You" : "Claude";
+    const who = m.sender === "human" ? "You" : bot;
     out.push(`${who}${m.created_at ? " (" + fmtTime(m.created_at) + ")" : ""}:`);
     for (const u of (m.uploads || [])) {
       if (u.content) out.push(`[Uploaded: ${u.name}]`, u.content);
@@ -1161,6 +1279,7 @@ function openConversation(uuid) {
     d.classList.toggle("active", d.dataset.uuid === uuid));
   const c = STORE.byUuid.get(uuid);
   if (!c) return;
+  currentSource = c.source || "claude";
   const branched = new Set(c._msgs.map(m => m.parent_message_uuid)).size < c._msgs.length;
   const thread = buildThread(c._msgs);
   lazyBlocks = [];
@@ -1208,18 +1327,23 @@ async function handleFile(file) {
   if (!file) return;
   el("loaderr").textContent = "";
   try {
-    let text;
+    let data;
     if (/\.zip$/i.test(file.name)) {
       setStatus("Unzipping " + file.name + "…");
       await yield_();
       const buf = new Uint8Array(await file.arrayBuffer());
-      // Pull conversations.json and any projects/*.json the zip happens to carry.
+      // Claude: conversations.json (+ projects/*.json). ChatGPT: conversations-000.json,
+      // conversations-001.json, … (split). Match both shapes and any projects.
       const entries = fflate.unzipSync(buf, {
-        filter: f => /(^|\/)conversations\.json$/i.test(f.name) || /(^|\/)projects\/[^/]+\.json$/i.test(f.name),
+        filter: f => /(^|\/)conversations(-\d+)?\.json$/i.test(f.name) || /(^|\/)projects\/[^/]+\.json$/i.test(f.name),
       });
-      const key = Object.keys(entries).find(k => /conversations\.json$/i.test(k));
-      if (!key) throw new Error("No conversations.json found inside the zip.");
-      text = dec.decode(entries[key]);
+      const convKeys = Object.keys(entries).filter(k => /conversations(-\d+)?\.json$/i.test(k)).sort();
+      if (!convKeys.length) throw new Error("No conversations file found inside the zip (looked for conversations.json or conversations-000.json).");
+      data = [];
+      for (const k of convKeys) {
+        const parsed = JSON.parse(dec.decode(entries[k]));
+        if (Array.isArray(parsed)) data = data.concat(parsed);
+      }
       for (const k of Object.keys(entries)) {
         if (/projects\/[^/]+\.json$/i.test(k)) {
           try { addProjects(JSON.parse(dec.decode(entries[k]))); } catch (_) {}
@@ -1227,15 +1351,15 @@ async function handleFile(file) {
       }
     } else {
       setStatus("Reading " + file.name + "…");
-      text = await file.text();
+      data = JSON.parse(await file.text());
     }
     setStatus("Parsing…");
     await yield_();
-    const data = JSON.parse(text);
-    if (!Array.isArray(data)) throw new Error("Expected an array of conversations (a Claude conversations.json export).");
-    setStatus("Indexing " + data.length + " conversations…");
+    if (!Array.isArray(data)) throw new Error("Expected an array of conversations (a Claude or ChatGPT export).");
+    const fmt = looksLikeChatGPT(data) ? "ChatGPT" : "Claude";
+    setStatus("Indexing " + data.length + " " + fmt + " conversations…");
     await yield_();
-    ingest(data);
+    ingestAny(data);
     revealApp("chats");
   } catch (e) {
     setStatus("");
