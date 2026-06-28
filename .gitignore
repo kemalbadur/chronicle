@@ -1,0 +1,17 @@
+# Personal Claude export data — never commit
+*.zip
+conversations.json
+conversations.db
+projects/
+users.json
+memories.json
+design_chats/
+
+# Generated artifacts (regenerable from source)
+Claude Viewer - User Guide.docx
+
+# macOS
+.DS_Store
+
+# Local Claude Code settings
+.claude/settings.local.json
