@@ -1,8 +1,8 @@
-# Conversations browser
+# Chronicle
 
-A local, threaded, full-text-searchable interface for a Claude
-`conversations.json` export (898 conversations · 6,662 messages ·
-Sep 2025 – Jun 2026).
+A local, threaded, full-text-searchable viewer for your exported **Claude** or
+**ChatGPT** history. Everything runs in your browser — your data never leaves
+your device.
 
 There are two ways to run it:
 
@@ -17,18 +17,21 @@ There are two ways to run it:
 ## Standalone single-file viewer (shareable)
 
 `conversations-viewer.html` is fully self-contained: open it in any browser,
-choose your Claude export, and everything (parsing, search, threading,
-Markdown) happens locally. **Your data never leaves your device** — no upload,
-no server, works offline. The only file a recipient needs is that one HTML
-file.
+choose your Claude or ChatGPT export, and everything (parsing, search,
+threading, Markdown) happens locally. **Your data never leaves your device** —
+no upload, no server, works offline. The only file a recipient needs is that
+one HTML file.
 
 ### For an end user
 
-1. Download your data from Claude: **Settings → Privacy → Export data**. You'll
-   get a `.zip` by email.
+1. Download your data:
+   - **Claude:** Settings → Privacy → Export data.
+   - **ChatGPT:** Settings → Data controls → Export data.
+
+   Either way you'll get a `.zip` by email.
 2. Open `conversations-viewer.html` in any modern browser (double-click).
-3. Drag the `.zip` (or the `conversations.json` inside it) anywhere on the
-   page, or click **Choose export…**.
+3. Drag the `.zip` anywhere on the page, or click **Choose export…**. Chronicle
+   detects whether it's a Claude or ChatGPT export automatically.
 
 That's it — no Python, no install, no internet.
 
@@ -42,6 +45,23 @@ the landing screen (or the Projects tab) and pick that `projects/` folder. Each
 project shows its instructions (rendered Markdown) and its documents (expandable,
 loaded on demand since some hold large extracted text). If a future export zip
 ever bundles `projects/*.json`, the viewer ingests those automatically too.
+
+#### ChatGPT exports
+
+Chronicle reads ChatGPT exports too — drag the whole `.zip` and the format is
+detected automatically. A few differences from Claude:
+
+- ChatGPT splits conversations across several files (`conversations-000.json`,
+  `conversations-001.json`, …); Chronicle merges them on load.
+- **Images** you sent or that ChatGPT generated are decoded from the export's
+  asset files (`*.dat`, mapped via `conversation_asset_file_names.json`) and
+  shown inline in the conversation.
+- The reply tree is rebuilt from each message's `parent` pointer; hidden
+  system/empty nodes are skipped.
+- Conversation dates come from the message timestamps (ChatGPT sometimes stamps
+  a chat's top-level date with the export date instead of the real one).
+- ChatGPT exports have **no projects or artifacts**, so those tabs stay empty
+  for them, and the assistant is labeled "ChatGPT" rather than "Claude".
 
 ### To build it (for the person packaging/sharing)
 

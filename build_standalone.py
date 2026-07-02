@@ -1,4 +1,4 @@
-"""Assemble the standalone, single-file Claude Conversation Viewer.
+"""Assemble the standalone, single-file Chronicle conversation viewer.
 
 Inlines the vendored JS libraries (fflate, marked, DOMPurify) into
 viewer.template.html and writes a self-contained conversations-viewer.html

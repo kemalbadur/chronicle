@@ -1,7 +1,7 @@
-"""Generate a Word (.docx) user guide for the Claude Conversation Viewer.
+"""Generate a Word (.docx) user guide for Chronicle (the conversation viewer).
 
 Run: python build_userguide.py
-Produents: "Claude Viewer - User Guide.docx"
+Produces: "Chronicle - User Guide.docx"
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from docx.shared import Pt, RGBColor
 ACCENT = RGBColor(0xB8, 0x55, 0x2A)   # terracotta, matches the viewer
 INK = RGBColor(0x2B, 0x2A, 0x27)
 MUTED = RGBColor(0x6B, 0x66, 0x60)
-OUT = Path(__file__).parent / "Claude Viewer - User Guide.docx"
+OUT = Path(__file__).parent / "Chronicle - User Guide.docx"
 
 
 def main() -> None:
@@ -29,12 +29,12 @@ def main() -> None:
 
     # ---- Title ----
     title = doc.add_paragraph()
-    run = title.add_run("Browsing Your Claude History")
+    run = title.add_run("Chronicle: Browsing Your Chat History")
     run.font.size = Pt(26)
     run.font.bold = True
     run.font.color.rgb = ACCENT
     sub = doc.add_paragraph()
-    r = sub.add_run("A simple guide to opening and searching your exported Claude data")
+    r = sub.add_run("A simple guide to opening and searching your exported Claude or ChatGPT data")
     r.font.size = Pt(13)
     r.font.color.rgb = MUTED
     doc.add_paragraph()
@@ -84,10 +84,10 @@ def main() -> None:
 
     # ---- Intro ----
     body(
-        "You have received a viewer file named conversations-viewer.html and a .zip "
-        "file containing your Claude data. The viewer lets you read and search your "
-        "past Claude conversations and projects in a familiar, chat-style layout. "
-        "It runs entirely in your web browser."
+        "Chronicle is a viewer file named conversations-viewer.html that lets you read "
+        "and search your past Claude or ChatGPT conversations in a familiar, chat-style "
+        "layout. You load it with the .zip data export from either service. It runs "
+        "entirely in your web browser."
     )
     note(
         "Your data stays private.",
@@ -95,6 +95,15 @@ def main() -> None:
         "server, and it works without an internet connection. Your data never leaves "
         "your device.",
     )
+
+    # ---- How to download your data ----
+    h("How to download your data")
+    body("First, export your history from the service you use:")
+    bullet("Claude:", "go to claude.ai, then Settings → Privacy → Export data. You "
+           "will receive a .zip by email.")
+    bullet("ChatGPT:", "go to chatgpt.com, then Settings → Data controls → Export "
+           "data. You will receive a .zip by email.")
+    body("Either .zip works with Chronicle, and you do not need to unzip it.")
 
     # ---- Getting started ----
     h("Getting started")
@@ -106,8 +115,9 @@ def main() -> None:
          "browser (Chrome, Safari, Edge, or Firefox all work).")
     step(3, "Load your data.",
          "Drag your .zip file anywhere onto the page, or click the “Choose export…” "
-         "button and select the .zip. Your conversations (and any projects) load "
-         "automatically.")
+         "button and select the .zip. Chronicle recognizes both Claude and ChatGPT "
+         "exports automatically — your conversations (and, for Claude, any projects) "
+         "load on their own.")
     step(4, "Start browsing.",
          "Your conversations appear in the list on the left, newest first. Click any "
          "one to read it.")
@@ -125,50 +135,74 @@ def main() -> None:
     bullet("Sort:", "Use the “sort” dropdown to order the list by most recent, oldest "
            "first, or title.")
     bullet("Open:", "Click a conversation to read the full back-and-forth. Your "
-           "messages appear on the right, Claude’s on the left.")
+           "messages appear on the right, the assistant’s (Claude or ChatGPT) on the "
+           "left.")
+
+    # ---- Artifacts, images, and generated files ----
+    h("Things the assistant made for you")
+    body(
+        "Content the assistant produced appears inside the conversation, either as its "
+        "own card or inline:"
+    )
+    bullet("Claude artifacts and files", "(documents, web pages, diagrams) render so "
+           "you can read them directly, each with a “Copy” button.")
+    bullet("ChatGPT images", "(pictures you sent, or ones that were generated for you) "
+           "appear inline in the conversation.")
+    body(
+        "Some Claude cards show computer code rather than a finished document. This is "
+        "normal and expected — see the next section."
+    )
+
+    # ---- Browsing by artifact ----
+    h("The Artifacts tab")
+    body(
+        "For Claude exports, the “Artifacts” tab gathers everything Claude built — "
+        "artifacts and generated files — into one searchable place, so you can browse "
+        "them without opening each conversation. Each one links back to the chat it "
+        "came from, and has its own “Export” button to save it as a file. (ChatGPT "
+        "exports have no artifacts, so this tab stays empty for them.)"
+    )
 
     # ---- Projects ----
-    h("Projects")
+    h("Projects (Claude only)")
     body(
         "If you used Projects in Claude, switch to the “Projects” tab at the top of "
         "the left panel. Your projects load from the same .zip file. Each project "
         "shows its custom instructions and its documents. Click a document to expand "
-        "it and read the text."
+        "it and read the text. ChatGPT exports don’t include projects, so this tab "
+        "stays empty for them."
     )
 
-    # ---- Artifacts and generated files ----
-    h("Things Claude made for you")
+    # ---- Saving a conversation ----
+    h("Saving or sharing a conversation")
     body(
-        "When Claude created an artifact or a file, it appears inside the "
-        "conversation as its own card:"
+        "At the top of any open conversation there are two buttons:"
     )
-    bullet("Documents, web pages, and diagrams", "render so you can read them directly.")
-    bullet("A “Copy” button", "appears on every card so you can grab the content.")
-    body(
-        "Some cards show computer code rather than a finished document. This is "
-        "normal and expected — see the next section."
-    )
+    bullet("Copy", "puts the whole conversation on your clipboard as plain text.")
+    bullet("Export .md", "saves the conversation as a Markdown file, named with its "
+           "date and title.")
 
     # ---- What you'll see / important to understand ----
     h("Why some things look like raw code")
     body(
-        "When Claude produced a Word, Excel, PowerPoint, or PDF file, your export "
-        "stores the code Claude wrote to generate that file — not the finished file "
+        "When the assistant produced a Word, Excel, PowerPoint, or PDF file, your "
+        "export stores the code it wrote to generate that file — not the finished file "
         "itself. So you will see code instead of the polished document."
     )
     body("To get the finished document back:")
     step(1, "Click the “Copy” button", "on the card.")
-    step(2, "Open a new chat at claude.ai,", "paste what you copied, and send the "
-         "message “Run this.”")
-    step(3, "Claude regenerates the file", "for you to download.")
+    step(2, "Open a new chat with the same assistant", "(claude.ai or chatgpt.com), "
+         "paste what you copied, and send the message “Run this.”")
+    step(3, "The assistant regenerates the file", "for you to download.")
 
     # ---- What's included ----
     h("What is and isn’t in your export")
-    bullet("Included:", "all your conversations, Claude’s answers, project "
-           "instructions, and the extracted text of documents you or Claude worked with.")
+    bullet("Included:", "all your conversations and the assistant’s answers; for "
+           "Claude, project instructions and the extracted text of documents; for "
+           "ChatGPT, the images from your chats.")
     bullet("Not included:", "the original copies of files you uploaded, and the "
-           "finished documents Claude generated. The export keeps the text and the "
-           "code, but not the original or final files themselves.")
+           "finished documents the assistant generated (Word, Excel, PDF, slides). The "
+           "export keeps the text and the code, but not those original or final files.")
 
     # ---- Tips ----
     h("Tips and troubleshooting")
@@ -178,8 +212,11 @@ def main() -> None:
            "left and pick a different .zip.")
     bullet("The info banner:", "the note at the top of a conversation can be dismissed "
            "with “Got it” and won’t come back.")
-    bullet("It looks empty:", "make sure you selected the .zip file you were given, "
-           "not an unzipped folder.")
+    bullet("It looks empty:", "make sure you selected the .zip file itself, not an "
+           "unzipped folder.")
+    bullet("My ChatGPT export has several files:", "that’s normal — ChatGPT splits "
+           "conversations across multiple files inside the .zip. Just load the whole "
+           ".zip and Chronicle combines them.")
 
     doc.add_paragraph()
     closing = doc.add_paragraph()

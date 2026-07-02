@@ -15,7 +15,7 @@
   HTML/React/SVG artifacts in your history still render. Egress is what's locked.
 -->
 <meta http-equiv="Content-Security-Policy" content="connect-src 'none'; form-action 'none'; base-uri 'none'" />
-<title>Claude Conversation Viewer</title>
+<title>Chronicle — AI conversation viewer</title>
 <style>
   :root {
     --bg: #faf9f7; --panel: #ffffff; --border: #e6e2db; --ink: #2b2a27;
@@ -176,6 +176,9 @@
   .srcbtn { font-size: 11px; font-weight: 600; padding: 4px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--muted); cursor: pointer; }
   .srcbtn:hover { color: var(--ink); border-color: #c9c3b8; }
   .htmlframe { width: 100%; height: 460px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+  .bubble.noreply { background: #fbf1e6; border-color: #e8cdba; }
+  .bubble.noreply .md { color: #7a5a3a; font-size: 13px; }
+  .msgimg { max-width: 100%; height: auto; border-radius: 8px; margin: 8px 0 0; display: block; border: 1px solid var(--border); background: #fff; }
   .svgwrap { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 12px; overflow: auto; text-align: center; }
   .svgwrap svg { max-width: 100%; height: auto; }
   .docnote { font-size: 12px; color: #7a5a3a; background: #fbf1e6; border: 1px solid #e8cdba; border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; line-height: 1.5; }
@@ -191,7 +194,7 @@
 
 <div id="landing">
   <div class="landing-card" id="drop">
-    <h1>Claude Conversation Viewer</h1>
+    <h1>Chronicle</h1>
     <p class="sub">Browse and search your exported Claude or ChatGPT history — threaded, with Markdown.</p>
     <p class="trust"><b>This runs on your computer and cannot upload your chats.</b>
       The page is configured to block every network connection, so your export
@@ -223,10 +226,11 @@
 <div class="app hidden">
   <aside class="sidebar">
     <header>
-      <h1>Claude Viewer <span class="reload" id="reload">↻ load another</span></h1>
+      <h1>Chronicle <span class="reload" id="reload">↻ load another</span></h1>
       <div class="tabs">
         <button class="tab active" id="tab-chats" data-view="chats">Chats</button>
         <button class="tab" id="tab-artifacts" data-view="artifacts">Artifacts</button>
+        <button class="tab" id="tab-library" data-view="library">Library</button>
         <button class="tab" id="tab-projects" data-view="projects">Projects</button>
       </div>
       <div class="stats" id="stats"></div>
@@ -302,7 +306,7 @@ const PROJECTS_BANNER = `<div class="banner" id="projBanner">
 const PROJECT_DOC_NOTE = `Text extracted from a document in this project. The original file isn't included in Anthropic's export.`;
 
 // In-memory store, built from the user's export file(s).
-const STORE = { conversations: [], byUuid: new Map(), projects: [], projByUuid: new Map(), artifacts: [], artByKey: new Map() };
+const STORE = { conversations: [], byUuid: new Map(), projects: [], projByUuid: new Map(), artifacts: [], artByKey: new Map(), library: [], libByKey: new Map() };
 
 function esc(s) {
   return (s || "").replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
@@ -396,6 +400,8 @@ function ingest(data) {
         parent_message_uuid: m.parent_message_uuid || ROOT_PARENT,
         created_at: m.created_at || "",
         body, thinking, artifacts, createdFiles, uploads,
+        images: m.images || [],   // inline data: URLs; kept out of the search index
+        noResponse: m.noResponse || false,
         tools: toolNames(content),
         _lc: (body + "\n" + thinking + "\n" + extra).toLowerCase(),
       };
@@ -481,6 +487,32 @@ function gptIso(t) {
   if (typeof t === "string") return t;
   return new Date(t * 1000).toISOString();
 }
+function mimeFromName(name) {
+  const n = (name || "").toLowerCase();
+  if (/\.png$/.test(n)) return "image/png";
+  if (/\.jpe?g$/.test(n)) return "image/jpeg";
+  if (/\.gif$/.test(n)) return "image/gif";
+  if (/\.webp$/.test(n)) return "image/webp";
+  if (/\.svg$/.test(n)) return "image/svg+xml";
+  if (/\.bmp$/.test(n)) return "image/bmp";
+  return "";
+}
+// Base64-encode a Uint8Array in chunks (avoids call-stack limits on big images).
+function bytesToBase64(bytes) {
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  return btoa(bin);
+}
+
+// A user message tagged as a Deep Research request (the result is generated
+// asynchronously and is NOT included in ChatGPT's export).
+function gptIsDeepResearch(m) {
+  const offs = m && m.metadata && m.metadata.serialization_metadata
+    && m.metadata.serialization_metadata.custom_symbol_offsets;
+  return Array.isArray(offs) && offs.some(o => o && typeof o.id === "string" && /deep_research/i.test(o.id));
+}
+
 // Turn one ChatGPT message's content into Claude-style content blocks + image refs.
 function gptBlocks(content) {
   const blocks = [], images = [];
@@ -524,7 +556,7 @@ function gptNearestKept(mapping, parentId, kept) {
   }
   return null;
 }
-function chatgptToClaude(arr) {
+function chatgptToClaude(arr, assets) {
   const out = [];
   for (const conv of arr) {
     const mapping = conv.mapping || {};
@@ -547,16 +579,45 @@ function chatgptToClaude(arr) {
     for (const id of kept) {
       const { m, blocks, images } = built.get(id);
       const parent = gptNearestKept(mapping, mapping[id].parent, kept) || ROOT_PARENT;
+      // Resolve image_asset_pointers to inline data: URLs via the zip's .dat
+      // files; anything we can't resolve falls back to a reference note.
+      const inlineImages = [], refFiles = [];
+      for (const ptr of images) {
+        const assetId = (ptr.asset_pointer || "").split("://").pop();
+        const a = assets && assets.get(assetId);
+        if (a && a.bytes) {
+          inlineImages.push({
+            src: "data:" + a.mime + ";base64," + bytesToBase64(a.bytes),
+            name: a.name || "image", width: ptr.width || 0, height: ptr.height || 0,
+          });
+        } else {
+          refFiles.push({ file_name: (a && a.name) || "image (not included in export)" });
+        }
+      }
+      // Non-image uploads (PDFs, CSVs, docs) live in metadata.attachments and
+      // have no content in the export — surface them as reference cards. Skip
+      // ones already shown as inline images (their id has a .dat blob).
+      for (const at of ((m.metadata || {}).attachments || [])) {
+        if (at.id && assets && assets.has(at.id)) continue;
+        refFiles.push({ file_name: at.name || "file" });
+      }
       msgs.push({
         uuid: id,
         sender: m.author.role === "user" ? "human" : "assistant",
         parent_message_uuid: parent,
         created_at: gptIso(m.create_time),
         content: blocks,
-        files: images.map(() => ({ file_name: "image (ChatGPT attachment — not included)" })),
+        images: inlineImages,
+        files: refFiles,
+        deepResearch: gptIsDeepResearch(m),
       });
     }
     if (!msgs.length) continue;
+    // Flag Deep Research prompts that got no reply: ChatGPT's export omits the
+    // result, so only the prompt is here. (A message is "unanswered" if nothing
+    // points to it as a parent.)
+    const answered = new Set(msgs.map(x => x.parent_message_uuid));
+    for (const x of msgs) x.noResponse = x.deepResearch && x.sender === "human" && !answered.has(x.uuid);
     msgs.sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
     // ChatGPT sometimes stamps a conversation's top-level create/update time with
     // the *export* date rather than the real one (seen on some pre-2024 chats).
@@ -575,10 +636,41 @@ function chatgptToClaude(arr) {
   }
   return out;
 }
-// Detect the export format and ingest accordingly.
-function ingestAny(data) {
-  if (looksLikeChatGPT(data)) ingest(chatgptToClaude(data));
+// Detect the export format and ingest accordingly. `assets` (optional) is a map
+// of ChatGPT asset id -> {bytes, mime, name} built from the zip's .dat files.
+function ingestAny(data, assets) {
+  if (looksLikeChatGPT(data)) ingest(chatgptToClaude(data, assets));
   else ingest(data);
+}
+
+// ChatGPT's Library (library_files.json): a cross-conversation file collection
+// (images here) that can include items attached to no chat. Resolve each to its
+// inline .dat blob; non-image or missing-blob items become references.
+function buildLibrary(libArr, assets) {
+  STORE.library = [];
+  STORE.libByKey.clear();
+  for (const f of (libArr || [])) {
+    const id = f.file_id || (f.id && f.id.id) || "";
+    if (!id) continue;
+    const a = assets && assets.get(id);
+    const mime = f.mime_type || (a && a.mime) || "";
+    const isImage = f.library_file_category === "image" || /^image\//.test(mime);
+    const entry = {
+      key: "lib|" + id,
+      id,
+      name: f.file_name || "(untitled)",
+      mime,
+      category: f.library_file_category || (isImage ? "image" : "file"),
+      generated: !!f.image_gen_generation_id,
+      created_at: f.created_at || "",
+      size: f.file_size_bytes || 0,
+      originThread: f.origination_thread_id || "",
+      src: (isImage && a && a.bytes) ? ("data:" + (mime || "image/png") + ";base64," + bytesToBase64(a.bytes)) : "",
+    };
+    entry._lc = (entry.name + "\n" + entry.mime + "\n" + entry.category).toLowerCase();
+    STORE.library.push(entry);
+    STORE.libByKey.set(entry.key, entry);
+  }
 }
 
 function computeStats() {
@@ -588,7 +680,7 @@ function computeStats() {
     if (c.created_at && (!earliest || c.created_at < earliest)) earliest = c.created_at;
     if (c.updated_at && (!latest || c.updated_at > latest)) latest = c.updated_at;
   }
-  return { conversations: STORE.conversations.length, messages, earliest, latest, projects: STORE.projects.length, artifacts: STORE.artifacts.length };
+  return { conversations: STORE.conversations.length, messages, earliest, latest, projects: STORE.projects.length, artifacts: STORE.artifacts.length, library: STORE.library.length };
 }
 
 // ---- Projects ----
@@ -849,18 +941,107 @@ function gotoConversation(uuid) {
   openConversation(uuid);
 }
 
+// ---- Library (ChatGPT cross-conversation files) ----
+function libTitle(l) { return l.name || "(untitled file)"; }
+function libIcon(l) { return l.category === "image" || /^image\//.test(l.mime) ? "🖼" : "📄"; }
+
+function listLibrary() {
+  const sort = el("sort").value;
+  const arr = STORE.library.slice();
+  if (sort === "name") arr.sort((a, b) => libTitle(a).localeCompare(libTitle(b)));
+  else if (sort === "created") arr.sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
+  else arr.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+  renderLibrary(arr, false);
+}
+
+function searchLibrary(q) {
+  const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return [];
+  return STORE.library.filter(l => terms.every(t => l._lc.includes(t)));
+}
+
+function renderLibrary(items, asSearch) {
+  el("count").textContent = asSearch
+    ? `${items.length} match${items.length === 1 ? "" : "es"}`
+    : `${items.length} file${items.length === 1 ? "" : "s"}`;
+  const list = el("list");
+  if (!items.length) {
+    list.innerHTML = !STORE.library.length
+      ? `<div class="empty" style="margin-top:30px; padding:0 16px; line-height:1.6">No library files in this export.</div>`
+      : `<div class="empty" style="margin-top:40px">No matches.</div>`;
+    return;
+  }
+  const terms = asSearch ? el("q").value.trim().toLowerCase().split(/\s+/).filter(Boolean) : [];
+  list.innerHTML = items.map(l => `
+    <div class="item ${l.key === activeUuid ? "active" : ""}" data-uuid="${esc(l.key)}">
+      <div class="title">${libIcon(l)} ${asSearch ? highlightText(libTitle(l), terms) : esc(libTitle(l))}</div>
+      <div class="meta">
+        <span>${fmtDate(l.created_at)}</span>
+        <span>${esc(l.category || "file")}</span>
+        ${l.generated ? `<span class="badge">generated</span>` : ""}
+      </div>
+    </div>`).join("");
+  list.querySelectorAll(".item").forEach(d =>
+    d.addEventListener("click", () => openLibraryItem(d.dataset.uuid)));
+}
+
+function openLibraryItem(key) {
+  activeUuid = key;
+  document.querySelectorAll(".item").forEach(d =>
+    d.classList.toggle("active", d.dataset.uuid === key));
+  const l = STORE.libByKey.get(key);
+  if (!l) return;
+  const metaBits = [
+    l.category || "file",
+    l.generated ? "generated" : "uploaded",
+    l.size ? Math.max(1, Math.round(l.size / 1024)) + " KB" : "",
+    fmtDate(l.created_at),
+  ].filter(Boolean).join(" · ");
+  const originLink = l.originThread && STORE.byUuid.has(l.originThread)
+    ? `<div class="desc">From conversation: <span class="linkbtn" id="gotoConv">${esc(STORE.byUuid.get(l.originThread).name)}</span></div>`
+    : "";
+  const view = l.src
+    ? `<img class="msgimg" src="${l.src}" alt="${esc(libTitle(l))}" title="${esc(libTitle(l))}" />
+       <div class="cardbar" style="margin-top:8px"><button class="srcbtn" id="exportLib" type="button">⬇ Export</button></div>`
+    : `<div class="upload-ref">${libIcon(l)} ${esc(libTitle(l))} <span class="muted">(file not included in export)</span></div>`;
+  el("view").innerHTML = `
+    <div class="proj-head">
+      <div class="conv-title">
+        <h2>${libIcon(l)} ${esc(libTitle(l))}</h2>
+      </div>
+      <div class="meta">${esc(metaBits)}</div>
+      ${originLink}
+    </div>
+    ${view}`;
+  const gc = el("gotoConv");
+  if (gc) gc.addEventListener("click", () => gotoConversation(l.originThread));
+  const ex = el("exportLib");
+  if (ex && l.src) ex.addEventListener("click", () => {
+    const pad = (n) => String(n).padStart(2, "0");
+    const d = l.created_at ? new Date(l.created_at) : new Date();
+    const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}-${pad(d.getMinutes())}`;
+    const clean = libTitle(l).replace(/[\/\\:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim() || "file";
+    downloadDataUrl(`${stamp}-${clean}`, l.src);
+  });
+  el("view").parentElement.scrollTop = 0;
+}
+
 function switchView(view) {
   currentView = view;
   activeUuid = null;
   el("tab-chats").classList.toggle("active", view === "chats");
   el("tab-artifacts").classList.toggle("active", view === "artifacts");
+  el("tab-library").classList.toggle("active", view === "library");
   el("tab-projects").classList.toggle("active", view === "projects");
   el("q").placeholder = view === "chats" ? "Search all messages…"
-    : view === "artifacts" ? "Search artifacts…" : "Search projects…";
+    : view === "artifacts" ? "Search artifacts…"
+    : view === "library" ? "Search library…" : "Search projects…";
   el("view").innerHTML = `<div class="empty">${view === "chats"
     ? "Select a conversation, or search to begin."
     : view === "artifacts"
     ? "Select an artifact or generated file to view it."
+    : view === "library"
+    ? "Select a library file to view it."
     : "Select a project to view its instructions and documents."}</div>`;
   renderCurrentList();
 }
@@ -871,6 +1052,8 @@ function renderCurrentList() {
     if (q) renderProjects(searchProjects(q), true); else listProjects();
   } else if (currentView === "artifacts") {
     if (q) renderArtifacts(searchArtifacts(q), true); else listArtifacts();
+  } else if (currentView === "library") {
+    if (q) renderLibrary(searchLibrary(q), true); else listLibrary();
   } else {
     if (q) renderList(search(q), true); else listConversations();
   }
@@ -1116,6 +1299,12 @@ function renderBubble(node) {
     files += lazyCard(mode, "genfile", "📄", esc(name), "Claude · " + kb(f.text) + " KB", f.text, false, mode === "code" ? codeNote(f.text) : "");
   }
 
+  let images = "";
+  for (const im of (node.images || [])) {
+    const dims = im.width && im.height ? ` width="${im.width}" height="${im.height}"` : "";
+    images += `<img class="msgimg" src="${im.src}" alt="${esc(im.name)}" title="${esc(im.name)}" loading="lazy"${dims} />`;
+  }
+
   let thinking = "";
   if (node.thinking)
     thinking = `<details class="think"><summary>💭 thinking</summary><div class="think-body md">${mdToHtml(node.thinking)}</div></details>`;
@@ -1123,17 +1312,24 @@ function renderBubble(node) {
   if (node.tools)
     tools = `<div style="margin-top:6px">${node.tools.split(", ").map(t => `<span class="chip">🔧 ${esc(t)}</span>`).join("")}</div>`;
 
-  const hasExtra = uploads || artifacts || files;
+  const hasExtra = uploads || artifacts || files || images;
   const body = node.body
     ? `<div class="md">${mdToHtml(node.body)}</div>`
     : (hasExtra ? "" : `<div class="md muted">(no text content)</div>`);
+  const noReply = node.noResponse
+    ? `<div class="row assistant"><div class="bubble noreply">
+         <div class="md">⚠ <b>No response in this export.</b> This was a ChatGPT
+         <b>Deep&nbsp;Research</b> request — ChatGPT's data export doesn't include
+         Deep Research results, so only your prompt was saved.</div>
+       </div></div>`
+    : "";
   return `
     <div class="row ${cls}">
       <div class="bubble">
         <div class="who">${who}<span class="ts">${fmtTime(node.created_at)}</span></div>
-        ${uploads}${body}${artifacts}${files}${thinking}${tools}
+        ${uploads}${body}${images}${artifacts}${files}${thinking}${tools}
       </div>
-    </div>`;
+    </div>${noReply}`;
 }
 function renderNode(node) {
   let html = renderBubble(node);
@@ -1195,6 +1391,7 @@ function chatToMarkdown(c) {
       else out.push(`*📎 Uploaded: ${u.name} (file not included in export)*`, "");
     }
     if (m.body) out.push(m.body, "");
+    for (const im of (m.images || [])) out.push(`*🖼 Image: ${im.name}*`, "");
     for (const a of (m.artifacts || [])) {
       out.push(`**🧩 Artifact: ${a.title}**${a.type ? ` (${a.type})` : ""}`, "");
       const f = fenceFor(a.text); out.push(f, a.text, f, "");
@@ -1218,6 +1415,7 @@ function chatToText(c) {
       else out.push(`[Uploaded: ${u.name} — file not included in export]`);
     }
     if (m.body) out.push(m.body);
+    for (const im of (m.images || [])) out.push(`[Image: ${im.name}]`);
     for (const a of (m.artifacts || [])) out.push(`[Artifact: ${a.title}${a.type ? " (" + a.type + ")" : ""}]`, a.text);
     for (const fl of (m.createdFiles || [])) { const name = (fl.path || "file").split("/").pop(); out.push(`[File: ${name}]`, fl.text); }
     out.push("");
@@ -1271,6 +1469,12 @@ function downloadText(filename, text, type) {
   a.href = url; a.download = filename;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+// Download an inline data: URL (e.g. a Library image) directly.
+function downloadDataUrl(filename, dataUrl) {
+  const a = document.createElement("a");
+  a.href = dataUrl; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
 }
 
 function openConversation(uuid) {
@@ -1328,6 +1532,9 @@ async function handleFile(file) {
   el("loaderr").textContent = "";
   try {
     let data;
+    const assets = new Map();   // ChatGPT image blobs, populated from the zip
+    let libraryJson = null;     // ChatGPT library_files.json, if present
+    buildLibrary([], null);     // reset any library from a previous load
     if (/\.zip$/i.test(file.name)) {
       setStatus("Unzipping " + file.name + "…");
       await yield_();
@@ -1335,7 +1542,11 @@ async function handleFile(file) {
       // Claude: conversations.json (+ projects/*.json). ChatGPT: conversations-000.json,
       // conversations-001.json, … (split). Match both shapes and any projects.
       const entries = fflate.unzipSync(buf, {
-        filter: f => /(^|\/)conversations(-\d+)?\.json$/i.test(f.name) || /(^|\/)projects\/[^/]+\.json$/i.test(f.name),
+        filter: f => /(^|\/)conversations(-\d+)?\.json$/i.test(f.name)
+          || /(^|\/)projects\/[^/]+\.json$/i.test(f.name)
+          || /\.dat$/i.test(f.name)                                  // ChatGPT image/file blobs
+          || /(^|\/)conversation_asset_file_names\.json$/i.test(f.name)
+          || /(^|\/)library_files\.json$/i.test(f.name),             // ChatGPT Library
       });
       const convKeys = Object.keys(entries).filter(k => /conversations(-\d+)?\.json$/i.test(k)).sort();
       if (!convKeys.length) throw new Error("No conversations file found inside the zip (looked for conversations.json or conversations-000.json).");
@@ -1349,6 +1560,20 @@ async function handleFile(file) {
           try { addProjects(JSON.parse(dec.decode(entries[k]))); } catch (_) {}
         }
       }
+      // Build the ChatGPT asset map: .dat blobs keyed by asset id, with the real
+      // filename/MIME from conversation_asset_file_names.json.
+      let assetNames = {};
+      const namesKey = Object.keys(entries).find(k => /conversation_asset_file_names\.json$/i.test(k));
+      if (namesKey) { try { assetNames = JSON.parse(dec.decode(entries[namesKey])); } catch (_) {} }
+      for (const k of Object.keys(entries)) {
+        if (!/\.dat$/i.test(k)) continue;
+        const datName = k.split("/").pop();
+        const assetId = datName.replace(/\.dat$/i, "");
+        const origName = assetNames[datName] || "";
+        assets.set(assetId, { bytes: entries[k], mime: mimeFromName(origName) || "image/png", name: origName });
+      }
+      const libKey = Object.keys(entries).find(k => /library_files\.json$/i.test(k));
+      if (libKey) { try { libraryJson = JSON.parse(dec.decode(entries[libKey])); } catch (_) {} }
     } else {
       setStatus("Reading " + file.name + "…");
       data = JSON.parse(await file.text());
@@ -1359,7 +1584,8 @@ async function handleFile(file) {
     const fmt = looksLikeChatGPT(data) ? "ChatGPT" : "Claude";
     setStatus("Indexing " + data.length + " " + fmt + " conversations…");
     await yield_();
-    ingestAny(data);
+    ingestAny(data, assets);
+    if (libraryJson) buildLibrary(libraryJson, assets);
     revealApp("chats");
   } catch (e) {
     setStatus("");
@@ -1390,15 +1616,24 @@ function revealApp(view) {
   const parts = [];
   if (s.conversations) parts.push(`${s.conversations} conversations · ${s.messages} messages`);
   if (s.artifacts) parts.push(`${s.artifacts} artifact${s.artifacts === 1 ? "" : "s"}`);
+  if (s.library) parts.push(`${s.library} library file${s.library === 1 ? "" : "s"}`);
   if (s.projects) parts.push(`${s.projects} project${s.projects === 1 ? "" : "s"}`);
   if (s.earliest) parts.push(`${fmtDate(s.earliest)} – ${fmtDate(s.latest)}`);
   el("stats").textContent = parts.join(" · ");
   el("tab-chats").textContent = `Chats${s.conversations ? " (" + s.conversations + ")" : ""}`;
   el("tab-artifacts").textContent = `Artifacts${s.artifacts ? " (" + s.artifacts + ")" : ""}`;
+  el("tab-library").textContent = `Library${s.library ? " (" + s.library + ")" : ""}`;
   el("tab-projects").textContent = `Projects${s.projects ? " (" + s.projects + ")" : ""}`;
+  // Show only tabs that have content (Chats always); keeps each export tidy.
+  el("tab-artifacts").classList.toggle("hidden", !s.artifacts);
+  el("tab-library").classList.toggle("hidden", !s.library);
+  el("tab-projects").classList.toggle("hidden", !s.projects);
   el("q").value = "";
   currentTerms = [];
-  switchView(view || currentView);
+  // If the requested view's tab is now hidden, fall back to Chats.
+  const hidden = { artifacts: !s.artifacts, library: !s.library, projects: !s.projects };
+  const target = view || currentView;
+  switchView(hidden[target] ? "chats" : target);
 }
 
 // ---- Wiring ----
@@ -1408,6 +1643,7 @@ el("q").addEventListener("input", onSearch);
 el("sort").addEventListener("change", renderCurrentList);
 el("tab-chats").addEventListener("click", () => { el("q").value = ""; currentTerms = []; switchView("chats"); });
 el("tab-artifacts").addEventListener("click", () => { el("q").value = ""; currentTerms = []; switchView("artifacts"); });
+el("tab-library").addEventListener("click", () => { el("q").value = ""; currentTerms = []; switchView("library"); });
 el("tab-projects").addEventListener("click", () => { el("q").value = ""; currentTerms = []; switchView("projects"); });
 el("reload").addEventListener("click", () => {
   document.querySelector(".app").classList.add("hidden");
