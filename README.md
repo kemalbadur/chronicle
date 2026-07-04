@@ -1,5 +1,19 @@
 # Chronicle
 
+A local toolkit for your exported **Claude** or **ChatGPT** history. Everything
+runs on your own machine — your data never leaves your device unless you choose
+to upload it. Two things it does:
+
+1. **View** — a threaded, full-text-searchable viewer for browsing your export.
+2. **Migrate** — turn your history into per-project knowledge documents +
+   memory blocks you can load into **Claude Enterprise** (or anywhere else).
+   See **[MIGRATE.md](MIGRATE.md)** for the step-by-step guide. *(Requires
+   [Claude Code](https://claude.com/claude-code), which does the summarizing.)*
+
+---
+
+## Viewer
+
 A local, threaded, full-text-searchable viewer for your exported **Claude** or
 **ChatGPT** history. Everything runs in your browser — your data never leaves
 your device.
@@ -144,6 +158,9 @@ AirPlay Receiver).
 | `build_index.py` | Parses the JSON export into `conversations.db` (SQLite + FTS5). |
 | `app.py` | Flask server: `/`, `/api/conversations`, `/api/search`, `/api/conversation/<uuid>`, `/api/stats`. |
 | `templates/index.html` | Single-page UI (no build step). |
+| `synopsis.py` | Migration tool: `list` / `build-map` / `prepare` / `assemble` (see [MIGRATE.md](MIGRATE.md)). |
+| `prompts/` | Copy-paste prompts: capture a project's chat list, and the brief/synthesis styles. |
 
-The export itself (`conversations.json`) and the generated
-`conversations.db` are not meant to be committed.
+The export itself (`conversations.json`), the generated `conversations.db`, and
+all migration inputs/outputs (`project_listings/`, `map.json`, `work/`, `out/`)
+are git-ignored and not meant to be committed.
