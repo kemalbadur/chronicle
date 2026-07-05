@@ -10,6 +10,10 @@ to upload it. Two things it does:
    See **[MIGRATE.md](MIGRATE.md)** for the step-by-step guide. *(Requires
    [Claude Code](https://claude.com/claude-code), which does the summarizing.)*
 
+**Just want to see it?** Run `python samples/build_samples.py` to generate two
+fake, UChicago-themed sample exports (Claude + ChatGPT — with chats, a project,
+and artifacts) and drag one into the viewer. See **[samples/](samples/)**.
+
 ---
 
 ## Viewer
