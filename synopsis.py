@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 # Reuse the export's block-extraction helpers rather than re-implement them.
-from build_index import _join_blocks, _tool_names, ROOT_PARENT
+from build_index import _join_blocks, _tool_names
 
 CARD_TOOLS = {"artifacts", "create_file"}
 UUID_RE = re.compile(r"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$", re.I)
