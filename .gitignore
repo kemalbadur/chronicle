@@ -7,8 +7,19 @@ users.json
 memories.json
 design_chats/
 
+# Migration tool — personal inputs & outputs (never commit)
+project_listings/
+map.json
+map.report.md
+work/
+out/
+all-chats.md
+chats.md
+migration_*/
+
 # Generated artifacts (regenerable from source)
 Chronicle - User Guide.docx
+__pycache__/
 
 # macOS
 .DS_Store
