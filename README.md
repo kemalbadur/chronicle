@@ -95,6 +95,33 @@ parsed in memory on load, which takes a few seconds and some RAM.
 
 ---
 
+## Migrate: summarize your projects into a new account
+
+Chronicle can turn an export into per-project **knowledge documents** and
+**memory blocks** — Claude-written summaries of every chat — that you upload
+into a fresh Claude Enterprise account (or any other tool). A Claude export
+has every chat but no record of which chats belonged to which project, so
+there's one manual step (you map chats → projects); the rest is automated.
+
+The pipeline (full walkthrough in **[MIGRATE.md](MIGRATE.md)**):
+
+1. **`list`** — dump every chat in the export to review it.
+2. **map** — tell the tool which chats belong to which project (via
+   `project_listings/`), then **`build-map`** resolves them.
+3. **`prepare`** — extract one full transcript per chat.
+4. **briefs** — Claude Code summarizes each transcript into a `.brief.md`
+   (pick a style in `prompts/`).
+5. **synthesis** — Claude Code writes a cross-chat memory block per project.
+6. **`assemble`** — produces `out/<project>.md` (knowledge doc) and
+   `out/<project>.memory.md` (memory) per project.
+
+Then, in the new account: create the project, upload `<project>.md` as project
+knowledge, and paste `<project>.memory.md` into its instructions. The
+summarizing runs in your own Claude Code — nothing is uploaded until you import
+it. *(Requires [Claude Code](https://claude.com/claude-code).)*
+
+---
+
 ## Local server version
 
 ## Setup
@@ -111,7 +138,7 @@ Re-run `build_index.py` whenever `conversations.json` changes. Set a
 different port with `PORT=8000 python app.py` (5000 is taken by macOS
 AirPlay Receiver).
 
-## What it does
+## What the viewer does
 
 - **Sidebar** lists every conversation; sort by recent / oldest / title.
 - **Search** runs SQLite FTS5 full-text search across all message bodies,
@@ -164,6 +191,7 @@ AirPlay Receiver).
 | `templates/index.html` | Single-page UI (no build step). |
 | `synopsis.py` | Migration tool: `list` / `build-map` / `prepare` / `assemble` (see [MIGRATE.md](MIGRATE.md)). |
 | `prompts/` | Copy-paste prompts: capture a project's chat list, and the brief/synthesis styles. |
+| `build_userguide.py` | Generates the Word user guide, "Chronicle - User Guide.docx". |
 
 The export itself (`conversations.json`), the generated `conversations.db`, and
 all migration inputs/outputs (`project_listings/`, `map.json`, `work/`, `out/`)
