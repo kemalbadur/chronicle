@@ -79,7 +79,7 @@ def load_export(zip_path: Path) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 def _fence_for(text: str) -> str:
     """Pick a backtick fence longer than any run of backticks in text."""
-    longest = max((len(m) for m in re.findall(r"`+", text or "")), default=0)
+    longest = max((len(m.group()) for m in re.finditer(r"`+", text or "")), default=0)
     return "`" * max(3, longest + 1)
 
 

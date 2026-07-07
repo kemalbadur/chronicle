@@ -96,6 +96,11 @@ CREATE TABLE conversations (
     message_count INTEGER
 );
 
+-- Back the sidebar sorts (updated / created / name) so they don't scan + sort.
+CREATE INDEX idx_conv_updated ON conversations(updated_at);
+CREATE INDEX idx_conv_created ON conversations(created_at);
+CREATE INDEX idx_conv_name ON conversations(name);
+
 CREATE TABLE messages (
     uuid TEXT PRIMARY KEY,
     conversation_uuid TEXT,

@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, g, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request
 
 DB_PATH = Path(__file__).parent / "conversations.db"
 ROOT_PARENT = "00000000-0000-4000-8000-000000000000"
@@ -20,23 +20,23 @@ app = Flask(__name__)
 # Re-render templates when the file changes so edits don't require a restart.
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 
+# The DB is read-only after build_index, so one shared read-only connection
+# serves every request — no per-request connect/close churn.
+_db: sqlite3.Connection | None = None
+
 
 def get_db() -> sqlite3.Connection:
-    if "db" not in g:
+    global _db
+    if _db is None:
         if not DB_PATH.exists():
             raise RuntimeError(
                 f"{DB_PATH.name} not found. Run: python build_index.py"
             )
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-    return g.db
-
-
-@app.teardown_appcontext
-def close_db(_: Any) -> None:
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
+        _db = sqlite3.connect(
+            f"file:{DB_PATH}?mode=ro", uri=True, check_same_thread=False
+        )
+        _db.row_factory = sqlite3.Row
+    return _db
 
 
 def _fts_query(raw: str) -> str:
