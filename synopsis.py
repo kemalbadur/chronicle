@@ -340,6 +340,139 @@ def project_meta_for(name: str, projects: list[dict[str, Any]]):
 
 
 # --------------------------------------------------------------------------- #
+# Rehydrate: recover generated documents by re-running docgen scripts
+# --------------------------------------------------------------------------- #
+# Same detector the viewer uses for its "this is code, not the document" note.
+DOCGEN = re.compile(
+    r"(require\(['\"]docx|from docx import|pptxgenjs|require\(['\"]exceljs"
+    r"|require\(['\"]xlsx|openpyxl|reportlab|require\(['\"]pdfkit|from pptx import)",
+    re.I,
+)
+
+
+def _doc_kind(text: str) -> str:
+    if re.search(r"docx", text, re.I):
+        return "Word (.docx)"
+    if re.search(r"pptx", text, re.I):
+        return "PowerPoint (.pptx)"
+    if re.search(r"exceljs|xlsx|openpyxl", text, re.I):
+        return "Excel (.xlsx)"
+    if re.search(r"reportlab|pdfkit", text, re.I):
+        return "PDF"
+    return "document"
+
+
+def _script_lang(text: str) -> str:
+    if re.search(r"require\(['\"]|module\.exports|pptxgenjs", text):
+        return "js"
+    if re.search(r"^\s*(from|import)\s+\w+", text, re.M):
+        return "py"
+    return "txt"
+
+
+def find_docgen_scripts(conversations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Document-generator scripts across all chats, deduped by (chat, title)
+    keeping the last (most recent) full version."""
+    found: dict[tuple[str, str], dict[str, Any]] = {}
+    for conv in conversations:
+        for msg in conv.get("chat_messages", []):
+            for block in msg.get("content") or []:
+                if block.get("type") != "tool_use":
+                    continue
+                inp = block.get("input") or {}
+                if block.get("name") == "artifacts":
+                    text = inp.get("content") or ""   # full versions only
+                    title = inp.get("title") or inp.get("id") or "artifact"
+                elif block.get("name") == "create_file":
+                    text = inp.get("file_text") or ""
+                    title = (inp.get("path") or "file").rsplit("/", 1)[-1]
+                else:
+                    continue
+                if not text or not DOCGEN.search(text):
+                    continue
+                found[(conv["uuid"], title)] = {
+                    "conv_uuid": conv["uuid"],
+                    "conv_name": conv.get("name") or "(untitled)",
+                    "conv_slug": chat_slug(conv),
+                    "title": title,
+                    "text": text,
+                    "kind": _doc_kind(text),
+                    "lang": _script_lang(text),
+                }
+    return list(found.values())
+
+
+def cmd_rehydrate(args) -> None:
+    import subprocess
+
+    data = load_export(Path(args.export))
+    scripts = find_docgen_scripts(data["conversations"])
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if not scripts:
+        print("No document-generator scripts found in this export.")
+        return
+    if args.run:
+        print("⚠ --run executes code that was stored in your export. Only do "
+              "this with your own history, and expect failures where scripts "
+              "need packages (docx, pptxgenjs, ...) you haven't installed.")
+    report = ["# Rehydrate report", "",
+              f"_{len(scripts)} document-generator script(s) found._", ""]
+    ran = ok = 0
+    for s in scripts:
+        sdir = out_dir / s["conv_slug"]
+        sdir.mkdir(parents=True, exist_ok=True)
+        base = slugify(s["title"]) or "script"
+        ext = {"js": ".js", "py": ".py"}.get(s["lang"], ".txt")
+        spath = sdir / f"{base}{ext}"
+        n = 2
+        while spath.exists() and spath.read_text() != s["text"]:
+            spath = sdir / f"{base}-{n}{ext}"
+            n += 1
+        spath.write_text(s["text"])
+        report.append(f"## {s['title']}  ({s['kind']})")
+        report.append(f"- from chat: {s['conv_name']}")
+        report.append(f"- script: `{spath.relative_to(out_dir)}`")
+        if args.run and ext != ".txt":
+            ran += 1
+            runner = ["node", spath.name] if ext == ".js" else [sys.executable, spath.name]
+            before = {p.name for p in sdir.iterdir()}
+            try:
+                proc = subprocess.run(
+                    runner, cwd=sdir, capture_output=True, text=True,
+                    timeout=args.timeout,
+                )
+                log = proc.stdout + proc.stderr
+                status = "ok" if proc.returncode == 0 else f"exit {proc.returncode}"
+            except FileNotFoundError:
+                log, status = f"{runner[0]} not installed", "no runtime"
+            except subprocess.TimeoutExpired:
+                log, status = f"timed out after {args.timeout}s", "timeout"
+            spath.with_suffix(spath.suffix + ".log").write_text(log)
+            created = sorted(
+                p for p in ({q.name for q in sdir.iterdir()} - before)
+                if not p.endswith(".log")
+            )
+            if status == "ok":
+                ok += 1
+                report.append(f"- **ran ok** — created: "
+                              f"{', '.join(created) if created else '(no new files)'}")
+            else:
+                report.append(f"- **failed** ({status}) — see "
+                              f"`{spath.relative_to(out_dir)}.log`")
+        elif args.run:
+            report.append("- skipped (could not tell if Node or Python)")
+        report.append("")
+    (out_dir / "rehydrate-report.md").write_text("\n".join(report) + "\n")
+    summary = (f"{ok}/{ran} script(s) ran clean; " if args.run else "")
+    print(f"{len(scripts)} script(s) extracted -> {out_dir}. "
+          f"{summary}Report: {out_dir / 'rehydrate-report.md'}")
+    if not args.run:
+        print("Nothing was executed. Re-run with --run to regenerate the "
+              "documents (needs node / the scripts' packages installed).")
+
+
+# --------------------------------------------------------------------------- #
 # Scrub: secret/PII detection over prepared transcripts
 # --------------------------------------------------------------------------- #
 # Order matters: more specific patterns first (sk-ant- before sk-).
@@ -895,6 +1028,17 @@ def main() -> None:
     p_prep.add_argument("--map", required=True)
     p_prep.add_argument("--out", default="work")
     p_prep.set_defaults(func=cmd_prepare)
+
+    p_reh = sub.add_parser("rehydrate",
+                           help="extract (and optionally run) document-generator "
+                                "scripts to recover generated files")
+    p_reh.add_argument("--export", required=True)
+    p_reh.add_argument("--out", default="rehydrated")
+    p_reh.add_argument("--run", action="store_true",
+                       help="execute the scripts (default: extract only)")
+    p_reh.add_argument("--timeout", type=int, default=120,
+                       help="per-script timeout in seconds with --run")
+    p_reh.set_defaults(func=cmd_rehydrate)
 
     p_res = sub.add_parser("resume",
                            help="write resume-primers for recently active threads")

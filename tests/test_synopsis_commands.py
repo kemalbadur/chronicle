@@ -170,3 +170,60 @@ def test_resume_writes_primers_for_active_threads(claude_zip, tmp_path, capsys):
     body = files[0].read_text()
     assert body.startswith("# Resume: A crest for the Maroons")
     assert "the last 1 of 2 messages" in body and "How to use:" in body
+
+
+@pytest.fixture()
+def docgen_zip(tmp_path):
+    """Export with two docgen scripts: one runnable (stdlib, reportlab only in
+    a comment), one that fails on a missing import."""
+    good = ("# report built with reportlab style\nimport os\n"
+            "open('out.pdf', 'w').write('fake pdf')\n")
+    bad = "from docx import Document\nDocument().save('x.docx')\n"
+    conv = {
+        "uuid": "dddddddd-0000-4000-8000-000000000004", "name": "Doc chats",
+        "created_at": "2026-05-01T00:00:00Z", "updated_at": "2026-05-01T00:00:00Z",
+        "chat_messages": [
+            {"uuid": "md-1", "sender": "assistant",
+             "parent_message_uuid": synopsis.UUID_RE.pattern and
+                "00000000-0000-4000-8000-000000000000",
+             "created_at": "2026-05-01T00:00:00Z",
+             "content": [
+                {"type": "tool_use", "name": "create_file",
+                 "input": {"path": "make_report.py", "file_text": good}},
+                {"type": "tool_use", "name": "artifacts",
+                 "input": {"id": "w1", "title": "Word builder", "type": "text/plain",
+                           "command": "create", "content": bad}},
+                {"type": "tool_use", "name": "artifacts",
+                 "input": {"id": "n1", "title": "Not docgen", "command": "create",
+                           "content": "just prose, no generators"}},
+             ]},
+        ],
+    }
+    p = tmp_path / "docgen.zip"
+    write_zip(p, {"conversations.json": json.dumps([conv])})
+    return p
+
+
+def test_rehydrate_extract_only(docgen_zip, tmp_path, capsys):
+    out = tmp_path / "rehydrated"
+    synopsis.cmd_rehydrate(ns(export=str(docgen_zip), out=str(out), run=False,
+                              timeout=30))
+    scripts = sorted(p.name for p in out.rglob("*") if p.is_file())
+    assert "make-report-py.py" in scripts or "make_report.py" in " ".join(scripts) \
+        or any(s.endswith(".py") for s in scripts)
+    assert any(s.endswith(".py") for s in scripts)      # both detected as python
+    assert not list(out.rglob("*.log"))                 # nothing executed
+    report = (out / "rehydrate-report.md").read_text()
+    assert "2 document-generator script(s)" in report
+    assert "Not docgen" not in report
+
+
+def test_rehydrate_run_reports_success_and_failure(docgen_zip, tmp_path, capsys):
+    out = tmp_path / "rehydrated"
+    synopsis.cmd_rehydrate(ns(export=str(docgen_zip), out=str(out), run=True,
+                              timeout=30))
+    report = (out / "rehydrate-report.md").read_text()
+    assert "**ran ok** — created: out.pdf" in report
+    assert "**failed**" in report
+    assert list(out.rglob("out.pdf"))
+    assert list(out.rglob("*.log"))
