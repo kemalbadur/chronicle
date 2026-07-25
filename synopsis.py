@@ -340,6 +340,76 @@ def project_meta_for(name: str, projects: list[dict[str, Any]]):
 
 
 # --------------------------------------------------------------------------- #
+# Scrub: secret/PII detection over prepared transcripts
+# --------------------------------------------------------------------------- #
+# Order matters: more specific patterns first (sk-ant- before sk-).
+SCRUB_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("private-key-block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("aws-access-key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("github-token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
+    ("anthropic-key", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}")),
+    ("openai-key", re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b")),
+    ("slack-token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
+    ("jwt", re.compile(
+        r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{5,}\b")),
+    ("secret-assignment", re.compile(
+        r"(?i)\b(?:api[_-]?key|secret|token|passwd|password)\b\s*[:=]\s*"
+        r"['\"]?[A-Za-z0-9_\-/+.]{12,}")),
+    ("email", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")),
+    ("phone", re.compile(r"\+\d[\d ().-]{7,}\d")),
+]
+
+
+def scrub_text(text: str) -> tuple[str, list[dict[str, Any]]]:
+    """Return (redacted_text, findings). Findings carry line/type/preview."""
+    findings: list[dict[str, Any]] = []
+    for kind, pat in SCRUB_PATTERNS:
+        for m in pat.finditer(text):
+            token = m.group()
+            findings.append({
+                "type": kind,
+                "line": text.count("\n", 0, m.start()) + 1,
+                "preview": token[:6] + "…" if len(token) > 9 else token[:3] + "…",
+            })
+        text = pat.sub(f"[REDACTED-{kind}]", text)
+    return text, findings
+
+
+def cmd_scrub(args) -> None:
+    work = Path(args.work)
+    paths = sorted(p for p in work.rglob("*.md") if not p.name.startswith("scrub-"))
+    if not paths:
+        sys.exit(f"No .md files under {work} — run `prepare` first.")
+    report = ["# Scrub report", "",
+              "Matches found by pattern scan. **Review before uploading anything.**",
+              "Re-run with `--apply` to redact these in place.", ""]
+    total = 0
+    for path in paths:
+        original = path.read_text()
+        redacted, findings = scrub_text(original)
+        if not findings:
+            continue
+        total += len(findings)
+        report.append(f"## {path.relative_to(work)}")
+        for f in findings:
+            report.append(f"- line {f['line']}: **{f['type']}** `{f['preview']}`")
+        report.append("")
+        if args.apply:
+            path.write_text(redacted)
+    if total == 0:
+        report.append("_No matches found._")
+    report_path = work / "scrub-report.md"
+    report_path.write_text("\n".join(report) + "\n")
+    action = "redacted in place" if args.apply else "found (nothing changed)"
+    print(f"{total} match(es) {action}. Report: {report_path}")
+    if total and not args.apply:
+        print("Review the report, then: python synopsis.py scrub --work "
+              f"{work} --apply")
+    print("For judgment calls regexes can't make (names, health, salary), "
+          "run a model pass with prompts/scrub.md.")
+
+
+# --------------------------------------------------------------------------- #
 # Map proposal (lexical scoring, no model, no network)
 # --------------------------------------------------------------------------- #
 _STOP = frozenset(
@@ -733,6 +803,13 @@ def main() -> None:
     p_prep.add_argument("--map", required=True)
     p_prep.add_argument("--out", default="work")
     p_prep.set_defaults(func=cmd_prepare)
+
+    p_scrub = sub.add_parser("scrub",
+                             help="scan prepared transcripts for secrets/PII")
+    p_scrub.add_argument("--work", default="work")
+    p_scrub.add_argument("--apply", action="store_true",
+                         help="redact matches in place (default: report only)")
+    p_scrub.set_defaults(func=cmd_scrub)
 
     p_asm = sub.add_parser("assemble", help="combine briefs into docs + memory blocks")
     p_asm.add_argument("--work", default="work")

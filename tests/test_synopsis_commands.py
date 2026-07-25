@@ -83,3 +83,33 @@ def test_propose_map_requires_projects(chatgpt_zip, tmp_path):
     with pytest.raises(SystemExit):
         synopsis.cmd_propose_map(
             ns(export=str(chatgpt_zip), out=str(tmp_path / "m.json"), min_score=0.05))
+
+
+def test_scrub_reports_then_applies(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    t = work / "chat.transcript.md"
+    t.write_text(
+        "My AWS key is AKIAIOSFODNN7EXAMPLE and my token ghp_"
+        + "a" * 36 + "\nmail me at phoenix@uchicago.edu\n"
+        "-----BEGIN RSA PRIVATE KEY-----\napi_key = 'abcd1234efgh5678'\n")
+    synopsis.cmd_scrub(ns(work=str(work), apply=False))
+    report = (work / "scrub-report.md").read_text()
+    for kind in ("aws-access-key", "github-token", "email",
+                 "private-key-block", "secret-assignment"):
+        assert kind in report
+    assert "AKIAIOSFODNN7EXAMPLE" in t.read_text()  # report-only: untouched
+
+    synopsis.cmd_scrub(ns(work=str(work), apply=True))
+    scrubbed = t.read_text()
+    assert "AKIAIOSFODNN7EXAMPLE" not in scrubbed
+    assert "[REDACTED-aws-access-key]" in scrubbed
+    assert "phoenix@uchicago.edu" not in scrubbed
+
+
+def test_scrub_clean_tree(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "ok.md").write_text("nothing sensitive here\n")
+    synopsis.cmd_scrub(ns(work=str(work), apply=False))
+    assert "No matches" in (work / "scrub-report.md").read_text()
