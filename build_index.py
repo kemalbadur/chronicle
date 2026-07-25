@@ -33,6 +33,7 @@ class FlatMessage:
     thinking: str
     tools: str
     attachments: str
+    search_extra: str  # attachment extracted text + artifact/created-file content
 
 
 def _join_blocks(content: list[dict[str, Any]], block_type: str) -> str:
@@ -62,6 +63,35 @@ def _attachment_names(message: dict[str, Any]) -> str:
     return ", ".join(names)
 
 
+def _attachment_text(message: dict[str, Any]) -> str:
+    """Extracted text of uploaded attachments (files[] carry no content)."""
+    parts: list[str] = []
+    for att in message.get("attachments") or []:
+        if att.get("extracted_content"):
+            parts.append(att["extracted_content"])
+    return "\n\n".join(parts)
+
+
+def _tool_content(content: list[dict[str, Any]]) -> str:
+    """Text of artifacts and Claude-created files, for the search index."""
+    parts: list[str] = []
+    for block in content:
+        if block.get("type") != "tool_use":
+            continue
+        inp = block.get("input") or {}
+        if block.get("name") == "artifacts":
+            text = inp.get("content") or inp.get("new_str") or ""
+            title = inp.get("title") or ""
+        elif block.get("name") == "create_file":
+            text = inp.get("file_text") or ""
+            title = inp.get("path") or ""
+        else:
+            continue
+        if text:
+            parts.append("\n".join(p for p in (title, text) if p))
+    return "\n\n".join(parts)
+
+
 def flatten(conversation: dict[str, Any]) -> list[FlatMessage]:
     rows: list[FlatMessage] = []
     for seq, msg in enumerate(conversation.get("chat_messages", [])):
@@ -79,6 +109,9 @@ def flatten(conversation: dict[str, Any]) -> list[FlatMessage]:
                 thinking=_join_blocks(content, "thinking"),
                 tools=_tool_names(content),
                 attachments=_attachment_names(msg),
+                search_extra="\n\n".join(
+                    p for p in (_attachment_text(msg), _tool_content(content)) if p
+                ),
             )
         )
     return rows
@@ -157,7 +190,11 @@ def build(src: Path, db_path: Path) -> None:
                 len(messages),
             )
         )
+        # One title row per conversation (message_uuid NULL): a term that
+        # matches the title scores once, not once per message (issue #12).
         name = conv.get("name") or ""
+        if name:
+            search_rows.append((None, conv["uuid"], name, ""))
         for m in messages:
             msg_rows.append(
                 (
@@ -173,9 +210,11 @@ def build(src: Path, db_path: Path) -> None:
                     m.attachments,
                 )
             )
-            searchable = "\n".join(p for p in (m.body, m.thinking, m.attachments) if p)
+            searchable = "\n".join(
+                p for p in (m.body, m.thinking, m.attachments, m.search_extra) if p
+            )
             if searchable.strip():
-                search_rows.append((m.uuid, m.conversation_uuid, name, searchable))
+                search_rows.append((m.uuid, m.conversation_uuid, "", searchable))
 
     conn.executemany(
         "INSERT INTO conversations VALUES (?,?,?,?,?,?)", conv_rows

@@ -125,7 +125,8 @@ let activeUuid = null;
 let searchMode = false;
 
 function esc(s) {
-  return (s || "").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+  return (s || "").replace(/[&<>"']/g, c =>
+    ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 function fmtDate(s) {
   if (!s) return "";
@@ -158,12 +159,12 @@ function renderList(items, asSearch) {
     return;
   }
   list.innerHTML = items.map(c => `
-    <div class="item ${c.uuid === activeUuid ? "active" : ""}" data-uuid="${c.uuid}">
+    <div class="item ${c.uuid === activeUuid ? "active" : ""}" data-uuid="${esc(c.uuid)}">
       <div class="title">${esc(c.name)}</div>
       <div class="meta">
         <span>${fmtDate(c.updated_at)}</span>
         <span>${c.message_count} msg</span>
-        ${asSearch ? `<span class="badge">${c.hits} hit${c.hits === 1 ? "" : "s"}</span>` : ""}
+        ${asSearch ? `<span class="badge">${c.hits > 0 ? c.hits + " hit" + (c.hits === 1 ? "" : "s") : "title"}</span>` : ""}
       </div>
       ${asSearch && c.snippet ? `<div class="snip">${snippet(c.snippet)}</div>` : ""}
     </div>`).join("");
@@ -264,12 +265,15 @@ function renderNode(node) {
   return html;
 }
 
+let openGen = 0;  // guards against a slower earlier fetch clobbering a newer one
 async function openConversation(uuid) {
   activeUuid = uuid;
+  const gen = ++openGen;
   document.querySelectorAll(".item").forEach(d =>
     d.classList.toggle("active", d.dataset.uuid === uuid));
   el("view").innerHTML = `<div class="loading">Loading…</div>`;
   const data = await (await fetch("/api/conversation/" + uuid)).json();
+  if (gen !== openGen) return;
   const c = data.conversation;
   const terms = el("q").value.trim() ? el("q").value.trim().split(/\s+/) : [];
   el("view").innerHTML = `
