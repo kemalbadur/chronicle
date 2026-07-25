@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -20,23 +21,23 @@ app = Flask(__name__)
 # Re-render templates when the file changes so edits don't require a restart.
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 
-# The DB is read-only after build_index, so one shared read-only connection
-# serves every request — no per-request connect/close churn.
-_db: sqlite3.Connection | None = None
+# The DB is read-only after build_index, so connections are cheap and
+# long-lived: one per serving thread (Flask's dev server is threaded), which
+# avoids sharing a sqlite3 connection across threads.
+_local = threading.local()
 
 
 def get_db() -> sqlite3.Connection:
-    global _db
-    if _db is None:
+    db = getattr(_local, "db", None)
+    if db is None:
         if not DB_PATH.exists():
             raise RuntimeError(
                 f"{DB_PATH.name} not found. Run: python build_index.py"
             )
-        _db = sqlite3.connect(
-            f"file:{DB_PATH}?mode=ro", uri=True, check_same_thread=False
-        )
-        _db.row_factory = sqlite3.Row
-    return _db
+        db = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+        db.row_factory = sqlite3.Row
+        _local.db = db
+    return db
 
 
 def _fts_query(raw: str) -> str:
@@ -77,31 +78,51 @@ def search() -> Any:
     if not match:
         return jsonify({"query": raw, "conversations": []})
 
-    # snippet()/rank are FTS5 auxiliary functions: they only work on a query
-    # that scans the FTS table directly (no JOIN). So query search alone, fold
-    # to one row per conversation, then attach conversation metadata.
-    rows = db.execute(
+    # Exact per-conversation counts, no LIMIT. Title rows (message_uuid NULL)
+    # are counted as a flag, not as hits, so a title term can't score once per
+    # message (see build_index.py).
+    counts = db.execute(
+        """
+        SELECT conversation_uuid AS uuid,
+               SUM(message_uuid IS NOT NULL) AS hits,
+               MAX(message_uuid IS NULL) AS title_match
+        FROM search
+        WHERE search MATCH ?
+        GROUP BY conversation_uuid
+        """,
+        (match,),
+    ).fetchall()
+    grouped: dict[str, dict[str, Any]] = {
+        r["uuid"]: {
+            "uuid": r["uuid"],
+            "hits": r["hits"],
+            "title_match": bool(r["title_match"]),
+            "snippet": None,
+        }
+        for r in counts
+    }
+    if not grouped:
+        return jsonify({"query": raw, "conversations": []})
+
+    # Best snippet per conversation. snippet()/rank are FTS5 auxiliary
+    # functions and only work on a direct scan of the FTS table (no JOIN).
+    # Capped at 2000 rows — snippets may be missed on huge result sets, but
+    # the hit counts above are always exact.
+    snips = db.execute(
         """
         SELECT conversation_uuid AS uuid,
                snippet(search, 3, '<<<', '>>>', ' … ', 12) AS snippet
         FROM search
-        WHERE search MATCH ?
+        WHERE search MATCH ? AND message_uuid IS NOT NULL
         ORDER BY rank
         LIMIT 2000
         """,
         (match,),
     ).fetchall()
-
-    grouped: dict[str, dict[str, Any]] = {}
-    for r in rows:
+    for r in snips:
         g_row = grouped.get(r["uuid"])
-        if g_row is None:
-            grouped[r["uuid"]] = {"uuid": r["uuid"], "snippet": r["snippet"], "hits": 1}
-        else:
-            g_row["hits"] += 1
-
-    if not grouped:
-        return jsonify({"query": raw, "conversations": []})
+        if g_row is not None and g_row["snippet"] is None:
+            g_row["snippet"] = r["snippet"]
 
     placeholders = ",".join("?" * len(grouped))
     meta = {
@@ -121,7 +142,7 @@ def search() -> Any:
 
     results = sorted(
         grouped.values(),
-        key=lambda d: (d["hits"], d.get("updated_at") or ""),
+        key=lambda d: (d["hits"], d["title_match"], d.get("updated_at") or ""),
         reverse=True,
     )
     return jsonify({"query": raw, "conversations": results[:200]})
