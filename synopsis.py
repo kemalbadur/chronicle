@@ -372,6 +372,33 @@ def cmd_list(args) -> None:
         print(out)
 
 
+def cmd_export(args) -> None:
+    """Write the export in the canonical format (FORMAT.md)."""
+    data = load_export(Path(args.export))
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    convs = data["conversations"]
+    (out_dir / "conversations.json").write_text(
+        json.dumps(convs, indent=2, ensure_ascii=False) + "\n"
+    )
+    print(f"Wrote {out_dir / 'conversations.json'} ({len(convs)} conversations)")
+    if args.markdown:
+        md_dir = out_dir / "markdown"
+        md_dir.mkdir(exist_ok=True)
+        index = ["# Conversation archive", ""]
+        used: set[str] = set()
+        for conv in sorted(convs, key=lambda c: c.get("created_at") or ""):
+            slug = chat_slug(conv)
+            if slug in used:
+                slug = f"{slug}-{str(conv.get('uuid'))[:8]}"
+            used.add(slug)
+            (md_dir / f"{slug}.md").write_text(render_transcript(conv))
+            index.append(f"- [{conv.get('name') or '(untitled)'}]({slug}.md) — "
+                         f"{(conv.get('created_at') or '')[:10]}")
+        (md_dir / "index.md").write_text("\n".join(index) + "\n")
+        print(f"Wrote {len(used)} transcripts -> {md_dir}")
+
+
 def cmd_build_map(args) -> None:
     data = load_export(Path(args.export))
     by_uuid, by_title = build_indexes(data["conversations"])
@@ -556,6 +583,13 @@ def main() -> None:
     p_list.add_argument("--since", help="only chats updated on/after YYYY-MM-DD")
     p_list.add_argument("--out", help="write to file instead of stdout")
     p_list.set_defaults(func=cmd_list)
+
+    p_exp = sub.add_parser("export", help="write the canonical format (FORMAT.md)")
+    p_exp.add_argument("--export", required=True)
+    p_exp.add_argument("--out", default="canonical")
+    p_exp.add_argument("--markdown", action="store_true",
+                       help="also write a per-chat Markdown archive")
+    p_exp.set_defaults(func=cmd_export)
 
     p_map = sub.add_parser("build-map", help="build map.json from project_listings/*.md")
     p_map.add_argument("--export", required=True)
