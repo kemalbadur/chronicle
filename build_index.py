@@ -117,6 +117,62 @@ def flatten(conversation: dict[str, Any]) -> list[FlatMessage]:
     return rows
 
 
+def collect_artifacts(conv: dict[str, Any]) -> list[tuple]:
+    """Rows for the artifacts table: artifacts (deduped by id, keeping the
+    latest full-content version) and Claude-created files (deduped by path),
+    mirroring the standalone viewer's indexArtifacts()."""
+    entries: dict[str, dict[str, Any]] = {}
+    for msg in conv.get("chat_messages", []):
+        when = msg.get("created_at") or ""
+        for block in msg.get("content") or []:
+            if block.get("type") != "tool_use":
+                continue
+            inp = block.get("input") or {}
+            if block.get("name") == "artifacts":
+                text = inp.get("content") or inp.get("new_str") or ""
+                if not text:
+                    continue
+                full = bool(inp.get("content"))
+                key = f"{conv['uuid']}|art|{inp.get('id') or inp.get('title') or ''}"
+                e = entries.get(key)
+                if e is None:
+                    entries[key] = {
+                        "key": key, "kind": "artifact",
+                        "title": inp.get("title") or "Artifact",
+                        "type": inp.get("type") or "", "text": text,
+                        "created_at": when, "updated_at": when,
+                        "versions": 1, "_full": full,
+                    }
+                else:
+                    e["versions"] += 1
+                    e["updated_at"] = when or e["updated_at"]
+                    e["title"] = inp.get("title") or e["title"]
+                    e["type"] = inp.get("type") or e["type"]
+                    if full or not e["_full"]:
+                        e["text"] = text
+                        e["_full"] = e["_full"] or full
+            elif block.get("name") == "create_file" and inp.get("file_text"):
+                path = inp.get("path") or "file"
+                key = f"{conv['uuid']}|file|{path}"
+                e = entries.get(key)
+                if e is None:
+                    entries[key] = {
+                        "key": key, "kind": "file",
+                        "title": path.rsplit("/", 1)[-1], "type": "",
+                        "text": inp["file_text"], "created_at": when,
+                        "updated_at": when, "versions": 1, "_full": True,
+                    }
+                else:
+                    e["versions"] += 1
+                    e["updated_at"] = when or e["updated_at"]
+                    e["text"] = inp["file_text"]
+    return [
+        (e["key"], conv["uuid"], e["kind"], e["title"], e["type"], e["text"],
+         e["created_at"], e["updated_at"], e["versions"])
+        for e in entries.values()
+    ]
+
+
 SCHEMA = """
 PRAGMA journal_mode = WAL;
 
@@ -149,6 +205,22 @@ CREATE TABLE messages (
 
 CREATE INDEX idx_messages_conv ON messages(conversation_uuid, seq);
 
+-- Artifacts / Claude-created files, one row per (conversation, artifact),
+-- latest full version kept. Consumed by the MCP server and future tools.
+CREATE TABLE artifacts (
+    key TEXT PRIMARY KEY,
+    conversation_uuid TEXT,
+    kind TEXT,
+    title TEXT,
+    type TEXT,
+    text TEXT,
+    created_at TEXT,
+    updated_at TEXT,
+    versions INTEGER
+);
+
+CREATE INDEX idx_artifacts_conv ON artifacts(conversation_uuid);
+
 CREATE VIRTUAL TABLE search USING fts5(
     message_uuid UNINDEXED,
     conversation_uuid UNINDEXED,
@@ -178,8 +250,10 @@ def build(src: Path, db_path: Path) -> None:
     conv_rows = []
     msg_rows = []
     search_rows = []
+    artifact_rows = []
     for conv in data:
         messages = flatten(conv)
+        artifact_rows.extend(collect_artifacts(conv))
         conv_rows.append(
             (
                 conv["uuid"],
@@ -225,6 +299,9 @@ def build(src: Path, db_path: Path) -> None:
     conn.executemany(
         "INSERT INTO search (message_uuid, conversation_uuid, name, body) VALUES (?,?,?,?)",
         search_rows,
+    )
+    conn.executemany(
+        "INSERT INTO artifacts VALUES (?,?,?,?,?,?,?,?,?)", artifact_rows
     )
     conn.commit()
     conn.execute("INSERT INTO search(search) VALUES('optimize')")
