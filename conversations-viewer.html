@@ -4,17 +4,21 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <!--
-  Content-Security-Policy: the load-bearing guarantee that this tool cannot
-  upload your data. `connect-src 'none'` blocks every programmatic network
-  channel (fetch, XMLHttpRequest, WebSocket, EventSource, navigator.sendBeacon);
-  `form-action 'none'` blocks form submissions; `base-uri 'none'` blocks <base>
-  hijacking. The browser itself enforces this, so even a tampered copy is
-  physically incapable of transmitting your export anywhere. Anyone can verify
-  it: open DevTools → Network and load a file — zero requests appear.
-  Note: script/style/img/frame are intentionally left unrestricted so that the
-  HTML/React/SVG artifacts in your history still render. Egress is what's locked.
+  Content-Security-Policy: the load-bearing privacy guarantee. `connect-src
+  'none'` blocks every programmatic network channel (fetch, XMLHttpRequest,
+  WebSocket, EventSource, navigator.sendBeacon); `form-action 'none'` blocks
+  form submissions; `base-uri 'none'` blocks <base> hijacking; `img-src data:
+  blob:` blocks remote images (everything the viewer renders is an inline
+  data: URL), so a remote-image reference inside a message can't trigger a
+  request either. The browser enforces all of this: the page's code cannot
+  send your export anywhere. Verify it: open DevTools → Network, load a file,
+  and browse — no requests appear.
+  Documented exception: script/style are intentionally left unrestricted so
+  the HTML/React artifacts in your history still render — opening such an
+  artifact may load its own libraries from a CDN. Artifact iframes inherit
+  this CSP, so their fetch/XHR and image loads are blocked too.
 -->
-<meta http-equiv="Content-Security-Policy" content="connect-src 'none'; form-action 'none'; base-uri 'none'" />
+<meta http-equiv="Content-Security-Policy" content="connect-src 'none'; form-action 'none'; base-uri 'none'; img-src data: blob:" />
 <title>Chronicle — AI conversation viewer</title>
 <style>
   :root {
@@ -218,7 +222,7 @@
     <h1>Chronicle</h1>
     <p class="sub">Browse and search your exported Claude or ChatGPT history — threaded, with Markdown.</p>
     <p class="trust"><b>This runs on your computer and cannot upload your chats.</b>
-      The page is configured to block every network connection, so your export
+      The page's code is blocked from sending data anywhere, so your export
       stays on your device — nothing is sent to us, to your institution, or to anyone.</p>
     <label class="filebtn">Choose export…
       <input type="file" id="file" accept=".json,.zip" hidden />
@@ -234,12 +238,14 @@
     <p class="privacy">
       <b>Why you can trust this.</b> Everything happens in your browser, on your
       device — no upload, no server, no account, no internet needed. The page
-      enforces a <code>Content-Security-Policy</code> that blocks all network
-      connections, so it is <b>technically incapable</b> of transmitting your
-      data anywhere. Verify it yourself: open your browser's developer tools,
-      switch to the <b>Network</b> tab, then load your export — you'll see zero
-      requests. The file is self-contained, so you can also disconnect from the
-      internet first and it works exactly the same.
+      enforces a <code>Content-Security-Policy</code> so its code <b>cannot send
+      your data anywhere</b> — no fetch, no forms, no beacons, and images are
+      restricted to inline data. Verify it yourself: open your browser's
+      developer tools, switch to the <b>Network</b> tab, then load your export
+      and browse — you'll see zero requests. One documented exception: opening
+      an HTML/React <b>artifact</b> from your history may load that artifact's
+      own libraries from a CDN. The file is self-contained, so you can also
+      disconnect from the internet first and browsing works exactly the same.
     </p>
   </div>
 </div>
@@ -330,7 +336,9 @@ const PROJECT_DOC_NOTE = `Text extracted from a document in this project. The or
 const STORE = { conversations: [], byUuid: new Map(), projects: [], projByUuid: new Map(), artifacts: [], artByKey: new Map(), library: [], libByKey: new Map() };
 
 function esc(s) {
-  return (s || "").replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  // Quotes included: esc() output is used inside double-quoted attributes.
+  return (s || "").replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 function fmtDate(s) {
   if (!s) return "";
@@ -797,7 +805,7 @@ function renderProjects(items, asSearch) {
   }
   const terms = asSearch ? el("q").value.trim().toLowerCase().split(/\s+/).filter(Boolean) : [];
   list.innerHTML = items.map(p => `
-    <div class="item ${p.uuid === activeUuid ? "active" : ""}" data-uuid="${p.uuid}">
+    <div class="item ${p.uuid === activeUuid ? "active" : ""}" data-uuid="${esc(p.uuid)}">
       <div class="title">${asSearch ? highlightText(projName(p), terms) : esc(projName(p))}</div>
       <div class="meta">
         <span>${fmtDate(p.updated_at)}</span>
@@ -1022,7 +1030,7 @@ function openLibraryItem(key) {
     ? `<div class="desc">From conversation: <span class="linkbtn" id="gotoConv">${esc(STORE.byUuid.get(l.originThread).name)}</span></div>`
     : "";
   const view = l.src
-    ? `<img class="msgimg" src="${l.src}" alt="${esc(libTitle(l))}" title="${esc(libTitle(l))}" />
+    ? `<img class="msgimg" src="${esc(l.src)}" alt="${esc(libTitle(l))}" title="${esc(libTitle(l))}" />
        <div class="cardbar" style="margin-top:8px"><button class="srcbtn" id="exportLib" type="button">⬇ Export</button></div>`
     : `<div class="upload-ref">${libIcon(l)} ${esc(libTitle(l))} <span class="muted">(file not included in export)</span></div>`;
   el("view").innerHTML = `
@@ -1098,7 +1106,7 @@ function renderList(items, asSearch) {
   }
   const terms = asSearch ? el("q").value.trim().toLowerCase().split(/\s+/).filter(Boolean) : [];
   list.innerHTML = items.map(c => `
-    <div class="item ${c.uuid === activeUuid ? "active" : ""}" data-uuid="${c.uuid}">
+    <div class="item ${c.uuid === activeUuid ? "active" : ""}" data-uuid="${esc(c.uuid)}">
       <div class="title">${asSearch ? highlightText(c.name, terms) : esc(c.name)}</div>
       <div class="meta">
         <span>${fmtDate(c.updated_at)}</span>
@@ -1322,8 +1330,10 @@ function renderBubble(node) {
 
   let images = "";
   for (const im of (node.images || [])) {
-    const dims = im.width && im.height ? ` width="${im.width}" height="${im.height}"` : "";
-    images += `<img class="msgimg" src="${im.src}" alt="${esc(im.name)}" title="${esc(im.name)}" loading="lazy"${dims} />`;
+    const w = +im.width, h = +im.height;  // export-derived: coerce, never interpolate raw
+    const dims = w > 0 && h > 0 && Number.isFinite(w) && Number.isFinite(h)
+      ? ` width="${w}" height="${h}"` : "";
+    images += `<img class="msgimg" src="${esc(im.src)}" alt="${esc(im.name)}" title="${esc(im.name)}" loading="lazy"${dims} />`;
   }
 
   let thinking = "";

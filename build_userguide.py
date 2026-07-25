@@ -91,8 +91,10 @@ def main() -> None:
     note(
         "Your data stays private.",
         "Everything happens on your own computer. Nothing is uploaded, there is no "
-        "server, and it works without an internet connection. Your data never leaves "
-        "your device.",
+        "server, and browsing works without an internet connection — the viewer's "
+        "code cannot send your data anywhere. One exception: opening an interactive "
+        "web page Claude built for you may load that page's own display libraries "
+        "from the internet.",
     )
 
     # ---- How to download your data ----
