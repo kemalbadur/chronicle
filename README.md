@@ -28,7 +28,9 @@ There are two ways to run it:
   server, runs entirely in the browser. This is the version to **share with
   other people** so they can browse their own exports. See below.
 - **Local server** (`app.py`) — the original Flask + SQLite version, best for
-  very large exports. Documented further down.
+  very large exports. Documented further down. Its UI is **feature-frozen**:
+  new viewer features land only in the standalone file; the server version
+  gets correctness and security fixes only.
 
 ---
 
@@ -39,6 +41,12 @@ choose your Claude or ChatGPT export, and everything (parsing, search,
 threading, Markdown) happens locally. **Your data never leaves your device** —
 no upload, no server, works offline. The only file a recipient needs is that
 one HTML file.
+
+One caveat to "works offline": the page's own code is blocked (by a
+Content-Security-Policy) from sending data anywhere, but if you open an
+HTML/React **artifact** from your history, that artifact may load its own
+display libraries from a CDN. Everything else — including all images — is
+fully local.
 
 ### For an end user
 
@@ -80,6 +88,31 @@ detected automatically. A few differences from Claude:
   a chat's top-level date with the export date instead of the real one).
 - ChatGPT exports have **no projects or artifacts**, so those tabs stay empty
   for them, and the assistant is labeled "ChatGPT" rather than "Claude".
+
+#### What you'll see
+
+- **Artifacts, generated files, and uploaded documents** are shown as their own
+  in-bubble cards:
+  - **Artifacts** Claude built (🧩) and **files Claude created** (📄) render by
+    type: Markdown as formatted text, **HTML in a sandboxed iframe** (with a
+    *View source* toggle), **SVG as an image**, everything else as code.
+  - Any card shown as **raw code** carries a short explanation that it's the
+    stored code, not the rendered result, and a **📋 Copy** button — paste it
+    into a new Claude chat and say "Run this" to recreate the output.
+    **Document-generator scripts** (Node `docx`/`pptxgenjs`/Excel, Python
+    `python-docx`/`reportlab`, etc.) get a more specific version naming the file
+    type, since the rendered Word/Excel/PDF is the program's *output* and **is
+    not in Anthropic's export** — only the generating code is.
+  - **Uploaded documents** (📎) with extracted text are collapsible; uploads
+    whose content isn't in the export are shown as a labeled reference.
+  All of this content is included in the search.
+- A one-time **overview banner** appears atop the first conversation you open,
+  summarizing the raw-content situation. Dismissing it ("Got it") is remembered
+  across sessions (`localStorage`).
+- The **Projects** view has the same treatment: its own one-time overview
+  banner, a **📋 Copy** button on the project instructions, and document cards
+  with a Copy button plus a note that the text is extracted (the original file
+  isn't in the export). Markdown/HTML/SVG project documents render in place.
 
 ### To build it (for the person packaging/sharing)
 
@@ -127,7 +160,7 @@ it. *(Requires [Claude Code](https://claude.com/claude-code).)*
 ## Setup
 
 ```sh
-pip install -r requirements.txt
+pip install ".[server]"      # installs flask (the rest of Chronicle is stdlib-only)
 python build_index.py        # builds conversations.db (~38 MB, <1s)
 python app.py                # serves http://127.0.0.1:5050
 ```
@@ -138,17 +171,18 @@ Re-run `build_index.py` whenever `conversations.json` changes. Set a
 different port with `PORT=8000 python app.py` (5000 is taken by macOS
 AirPlay Receiver).
 
-## What the viewer does
+## What the server viewer does
 
 - **Sidebar** lists every conversation; sort by recent / oldest / title.
-- **Search** runs SQLite FTS5 full-text search across all message bodies,
-  thinking blocks, and attachment text. Results are ranked, show a hit
-  count per conversation, and a highlighted snippet. Last word is treated
-  as a prefix (`embed` matches `embedding`).
+- **Search** runs SQLite FTS5 full-text search across message bodies, thinking
+  blocks, uploaded-attachment text, and the content of artifacts and files
+  Claude created. Results are ranked by per-conversation hit count (a title
+  match is flagged separately and doesn't inflate the count), with a
+  highlighted snippet. The last word is treated as a prefix (`embed` matches
+  `embedding`).
 - **Threaded view** reconstructs the reply tree from `parent_message_uuid`.
-  Linear chats render flat; conversations that actually branch (44 of them)
-  show each branch indented under a `branch N` rail and are tagged
-  `⑂ branched thread`.
+  Linear chats render flat; branched conversations show each branch indented
+  under a `branch N` rail and are tagged `⑂ branched thread`.
 - **Chat-bubble layout**: your messages align right, Claude's align left
   (texting-app style).
 - **Markdown rendering**: message bodies and thinking blocks are rendered as
@@ -157,30 +191,12 @@ AirPlay Receiver).
 - Per message: assistant **thinking** is collapsible, **tool** calls
   (`web_search`, etc.) show as chips, search terms are highlighted in the body
   (highlighting skips code blocks).
-- **Artifacts, generated files, and uploaded documents** are shown as their own
-  in-bubble cards:
-  - **Artifacts** Claude built (🧩) and **files Claude created** (📄) render by
-    type: Markdown as formatted text, **HTML in a sandboxed iframe** (with a
-    *View source* toggle), **SVG as an image**, everything else as code.
-  - Any card shown as **raw code** carries a short explanation that it's the
-    stored code, not the rendered result, and a **📋 Copy** button — paste it
-    into a new Claude chat and say "Run this" to recreate the output.
-    **Document-generator scripts** (Node `docx`/`pptxgenjs`/Excel, Python
-    `python-docx`/`reportlab`, etc.) get a more specific version naming the file
-    type, since the rendered Word/Excel/PDF is the program's *output* and **is
-    not in Anthropic's export** — only the generating code is.
-  - **Uploaded documents** (📎) with extracted text are collapsible; uploads
-    whose content isn't in the export are shown as a labeled reference.
-  All of this content is included in the search index.
-- A one-time **overview banner** appears atop the first conversation you open,
-  summarizing the raw-content situation. Dismissing it ("Got it") is remembered
-  across sessions (`localStorage`).
-- The **Projects** view has the same treatment: its own one-time overview
-  banner, a **📋 Copy** button on the project instructions, and document cards
-  with a Copy button plus a note that the text is extracted (the original file
-  isn't in the export). Markdown/HTML/SVG project documents render in place.
 - **Deep links**: the URL reflects state, e.g.
   `/?q=minitel&open=<conversation-uuid>` — shareable and reloadable.
+
+Richer features — artifact and document cards, the overview banners, the
+Artifacts/Library/Projects tabs, copy/export buttons — live in the standalone
+viewer (see above); they are not part of the server UI.
 
 ## Files
 
@@ -191,8 +207,20 @@ AirPlay Receiver).
 | `templates/index.html` | Single-page UI (no build step). |
 | `synopsis.py` | Migration tool: `list` / `build-map` / `prepare` / `assemble` (see [MIGRATE.md](MIGRATE.md)). |
 | `prompts/` | Copy-paste prompts: capture a project's chat list, and the brief/synthesis styles. |
-| `build_userguide.py` | Generates the Word user guide, "Chronicle - User Guide.docx". |
+| `build_userguide.py` | Generates the Word user guide, "Chronicle - User Guide.docx". Needs `pip install ".[docs]"`. |
 
 The export itself (`conversations.json`), the generated `conversations.db`, and
 all migration inputs/outputs (`project_listings/`, `map.json`, `work/`, `out/`)
 are git-ignored and not meant to be committed.
+
+## Development
+
+```sh
+pip install -e ".[server,docs,dev]"
+python -m pytest                 # run the test suite
+ruff check .                     # lint
+python build_standalone.py      # rebuild conversations-viewer.html after editing viewer.template.html
+```
+
+CI verifies that `conversations-viewer.html` is up to date with
+`viewer.template.html` — always rebuild and commit both together.
