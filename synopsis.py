@@ -340,6 +340,129 @@ def project_meta_for(name: str, projects: list[dict[str, Any]]):
 
 
 # --------------------------------------------------------------------------- #
+# Map proposal (lexical scoring, no model, no network)
+# --------------------------------------------------------------------------- #
+_STOP = frozenset(
+    "a an and are as at be but by for from has have i if in is it its me my of on or "
+    "so that the this to was we what when which with you your can could should would "
+    "do does did how not no yes just like get make want need help please also".split()
+)
+
+
+def _tokens(text: str) -> list[str]:
+    return [t for t in re.findall(r"[a-z0-9]{3,}", (text or "").lower()) if t not in _STOP]
+
+
+def _chat_text(conv: dict[str, Any], max_chars: int = 4000) -> str:
+    """Title (weighted by repetition) + the first stretch of message text."""
+    parts = [(conv.get("name") or "") * 3]
+    total = 0
+    for m in conv.get("chat_messages", []):
+        body = _join_blocks(m.get("content") or [], "text") or (m.get("text") or "")
+        parts.append(body[: max_chars - total])
+        total += len(body)
+        if total >= max_chars:
+            break
+    return "\n".join(parts)
+
+
+def propose_map(
+    conversations: list[dict[str, Any]],
+    projects: list[dict[str, Any]],
+    min_score: float = 0.05,
+) -> tuple[dict[str, list[str]], list[dict[str, Any]]]:
+    """Score every chat against every project profile; return (draft_map, rows).
+
+    Cosine similarity over IDF-weighted term counts. Each row carries the
+    top-2 candidates and a confidence margin so a human can review the
+    low-margin assignments. Purely lexical — a reviewable first draft, not
+    a decision.
+    """
+    import math
+    from collections import Counter
+
+    chat_tokens = {c["uuid"]: Counter(_tokens(_chat_text(c))) for c in conversations}
+    # IDF over the chat corpus (projects share it; smooth for unseen terms).
+    n_docs = max(1, len(chat_tokens))
+    df: Counter = Counter()
+    for toks in chat_tokens.values():
+        df.update(set(toks))
+    idf = {t: math.log((1 + n_docs) / (1 + d)) + 1 for t, d in df.items()}
+
+    def vec(counts: Counter) -> dict[str, float]:
+        return {t: n * idf.get(t, 1.0) for t, n in counts.items()}
+
+    def cosine(a: dict[str, float], b: dict[str, float]) -> float:
+        if not a or not b:
+            return 0.0
+        dot = sum(w * b[t] for t, w in a.items() if t in b)
+        na = math.sqrt(sum(w * w for w in a.values()))
+        nb = math.sqrt(sum(w * w for w in b.values()))
+        return dot / (na * nb) if na and nb else 0.0
+
+    proj_vecs: dict[str, dict[str, float]] = {}
+    for p in projects:
+        profile = "\n".join(
+            [(p.get("name") or "") * 3, p.get("description") or "",
+             p.get("prompt_template") or ""]
+            + [f"{d.get('filename') or ''}\n{d.get('content') or ''}"
+               for d in p.get("docs") or []]
+        )
+        proj_vecs[(p.get("name") or "").strip()] = vec(Counter(_tokens(profile)))
+
+    draft: dict[str, list[str]] = {name: [] for name in proj_vecs}
+    rows: list[dict[str, Any]] = []
+    for c in conversations:
+        cv = vec(chat_tokens[c["uuid"]])
+        scored = sorted(
+            ((cosine(cv, pv), name) for name, pv in proj_vecs.items()), reverse=True
+        )
+        best_score, best = scored[0] if scored else (0.0, "")
+        second = scored[1] if len(scored) > 1 else (0.0, "")
+        assigned = best if best_score >= min_score else ""
+        if assigned:
+            draft[assigned].append(c["uuid"])
+        rows.append({
+            "uuid": c["uuid"], "title": c.get("name") or "(untitled)",
+            "assigned": assigned, "score": round(best_score, 3),
+            "runner_up": second[1], "runner_up_score": round(second[0], 3),
+            "margin": round(best_score - second[0], 3),
+        })
+    return draft, rows
+
+
+def cmd_propose_map(args) -> None:
+    data = load_export(Path(args.export))
+    if not data["projects"]:
+        sys.exit("No projects/ in this export — nothing to score against. "
+                 "(ChatGPT exports have no projects; use project_listings/ + build-map.)")
+    draft, rows = propose_map(data["conversations"], data["projects"], args.min_score)
+    Path(args.out).write_text(json.dumps(draft, indent=2))
+    report_path = Path(args.out).with_suffix(".report.md")
+    lines = [
+        "# propose-map report", "",
+        "Lexical draft — **review before use**. Low-margin rows are guesses.",
+        "", "| assigned | score | margin | runner-up | title |",
+        "|----------|-------|--------|-----------|-------|",
+    ]
+    for r in sorted(rows, key=lambda r: (r["assigned"] == "", -r["margin"])):
+        lines.append(
+            f"| {r['assigned'] or '—'} | {r['score']} | {r['margin']} "
+            f"| {r['runner_up']} ({r['runner_up_score']}) "
+            f"| {r['title'].replace('|', chr(92) + '|')} |"
+        )
+    unassigned = sum(1 for r in rows if not r["assigned"])
+    lines += ["", f"_{len(rows)} chats scored; {unassigned} left unassigned "
+              f"(score < {args.min_score})._"]
+    report_path.write_text("\n".join(lines) + "\n")
+    print(f"Draft map: {args.out} "
+          f"({sum(len(v) for v in draft.values())} assigned, {unassigned} unassigned)")
+    print(f"Review report: {report_path}")
+    print("Next: correct the draft by hand (or with prompts/propose-map.md), "
+          "then use it as your map for `prepare`.")
+
+
+# --------------------------------------------------------------------------- #
 # Commands
 # --------------------------------------------------------------------------- #
 def cmd_list(args) -> None:
@@ -596,6 +719,14 @@ def main() -> None:
     p_map.add_argument("--listings", default="project_listings")
     p_map.add_argument("--out", default="map.json")
     p_map.set_defaults(func=cmd_build_map)
+
+    p_pm = sub.add_parser("propose-map",
+                          help="draft map.json by scoring chats against export projects")
+    p_pm.add_argument("--export", required=True)
+    p_pm.add_argument("--out", default="map.draft.json")
+    p_pm.add_argument("--min-score", type=float, default=0.05,
+                      help="below this cosine score a chat stays unassigned")
+    p_pm.set_defaults(func=cmd_propose_map)
 
     p_prep = sub.add_parser("prepare", help="extract transcript bundles per project")
     p_prep.add_argument("--export", required=True)

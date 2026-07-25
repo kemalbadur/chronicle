@@ -65,3 +65,21 @@ def test_export_canonical_and_markdown(chatgpt_zip, tmp_path, capsys):
     assert "index.md" in files and len(files) == 3
     body = next(p for p in md_dir.glob("*.md") if p.name != "index.md").read_text()
     assert "## [0] You" in body and "ChatGPT" in body
+
+
+def test_propose_map_assigns_related_chats(claude_zip, tmp_path, capsys):
+    out = tmp_path / "map.draft.json"
+    synopsis.cmd_propose_map(ns(export=str(claude_zip), out=str(out), min_score=0.05))
+    draft = json.loads(out.read_text())
+    # The sample project "UChicago Facts" profiles Core/Fermi/Pile-1 topics;
+    # at least the Pile-1 chat must land there, and the report must exist.
+    assert "UChicago Facts" in draft
+    assert "22222222-2222-4222-8222-222222222222" in draft["UChicago Facts"]
+    report = out.with_suffix(".report.md").read_text()
+    assert "propose-map report" in report and "margin" in report
+
+
+def test_propose_map_requires_projects(chatgpt_zip, tmp_path):
+    with pytest.raises(SystemExit):
+        synopsis.cmd_propose_map(
+            ns(export=str(chatgpt_zip), out=str(tmp_path / "m.json"), min_score=0.05))
