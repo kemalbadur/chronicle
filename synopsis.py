@@ -38,6 +38,7 @@ from typing import Any
 
 # Reuse the export's block-extraction helpers rather than re-implement them.
 from build_index import _join_blocks, _tool_names
+from chatgpt_export import chatgpt_to_claude, looks_like_chatgpt
 
 CARD_TOOLS = {"artifacts", "create_file"}
 UUID_RE = re.compile(r"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$", re.I)
@@ -47,15 +48,31 @@ UUID_RE = re.compile(r"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$", re.I)
 # Export reading
 # --------------------------------------------------------------------------- #
 def load_export(zip_path: Path) -> dict[str, Any]:
-    """Read the parts of the export we need into memory."""
+    """Read the parts of the export we need into memory.
+
+    Accepts a Claude export (conversations.json [+ projects/, memories.json])
+    or a ChatGPT export (conversations.json, possibly split into
+    conversations-000.json, ...), which is normalized to the Claude shape.
+    """
     if not zip_path.exists():
         sys.exit(f"Export not found: {zip_path}")
     with zipfile.ZipFile(zip_path) as zf:
         names = set(zf.namelist())
-        if "conversations.json" not in names:
-            sys.exit("conversations.json not found in export (is this a Claude export?)")
-        with zf.open("conversations.json") as fh:
-            conversations = json.load(fh)
+        conv_names = sorted(
+            n for n in names
+            if re.fullmatch(r"(?:[^/]+/)?conversations(-\d+)?\.json", n)
+        )
+        if not conv_names:
+            sys.exit("No conversations file found in export "
+                     "(looked for conversations.json / conversations-000.json).")
+        conversations: list[dict[str, Any]] = []
+        for n in conv_names:
+            with zf.open(n) as fh:
+                part = json.load(fh)
+            if isinstance(part, list):
+                conversations.extend(part)
+        if looks_like_chatgpt(conversations):
+            conversations = chatgpt_to_claude(conversations)
         projects = []
         for name in names:
             if name.startswith("projects/") and name.endswith(".json"):
@@ -125,12 +142,19 @@ def render_transcript(conv: dict[str, Any]) -> str:
         for para in conv["summary"].split("\n"):
             lines.append(f"> {para}")
 
+    assistant = "ChatGPT" if conv.get("source") == "chatgpt" else "Claude"
     for seq, msg in enumerate(conv.get("chat_messages", [])):
         content = msg.get("content") or []
-        speaker = "You" if msg.get("sender") == "human" else "Claude"
+        speaker = "You" if msg.get("sender") == "human" else assistant
         lines.append(f"\n## [{seq}] {speaker}")
+        if msg.get("no_response"):
+            lines.append("_[Deep Research request — the result is not included "
+                         "in ChatGPT's export; only this prompt was saved.]_")
         for att in _render_attachments(msg):
             lines.append(att)
+        for f in msg.get("files") or []:
+            if f.get("file_name"):
+                lines.append(f"_[uploaded: {f['file_name']} — content not in export]_")
         body = _join_blocks(content, "text") or (msg.get("text") or "")
         if body.strip():
             lines.append(body)
