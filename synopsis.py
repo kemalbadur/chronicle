@@ -706,43 +706,128 @@ def cmd_prepare(args) -> None:
           "(Claude Code agents), then run `assemble`.")
 
 
+def cmd_resume(args) -> None:
+    """Write a resume-primer per recently active conversation."""
+    from datetime import datetime, timedelta
+
+    def parse_ts(s: str) -> datetime | None:
+        try:
+            return datetime.fromisoformat((s or "").replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    data = load_export(Path(args.export))
+    stamped = [(parse_ts(c.get("updated_at") or ""), c) for c in data["conversations"]]
+    stamped = [(t, c) for t, c in stamped if t is not None]
+    if not stamped:
+        sys.exit("No parseable timestamps in this export.")
+    # Cutoff is relative to the newest activity in the export, not to today —
+    # the export itself may be weeks old.
+    latest = max(t for t, _ in stamped)
+    cutoff = latest - timedelta(days=args.days)
+    active = sorted(((t, c) for t, c in stamped if t >= cutoff), reverse=True,
+                    key=lambda tc: tc[0])
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    used: set[str] = set()
+    for _, conv in active:
+        slug = chat_slug(conv)
+        if slug in used:
+            slug = f"{slug}-{conv['uuid'][:8]}"
+        used.add(slug)
+        msgs = conv.get("chat_messages", [])
+        tail = msgs[-args.tail:]
+        shown = (f"the last {len(tail)} of {len(msgs)} messages"
+                 if len(tail) < len(msgs) else f"all {len(msgs)} messages")
+        primer = [
+            f"# Resume: {conv.get('name') or '(untitled)'}",
+            f"_Last active {(conv.get('updated_at') or '')[:10]} · {shown} below_",
+            "",
+            "**How to use:** start a chat in your new assistant and paste "
+            "everything below, prefaced with: \"This is the tail of an earlier "
+            "conversation I want to continue. Read it and pick up where we "
+            "left off.\" (Or distill these files first with prompts/resume.md.)",
+            "",
+            "---",
+            "",
+            render_transcript({**conv, "chat_messages": tail}).rstrip(),
+        ]
+        (out_dir / f"{slug}.resume.md").write_text("\n".join(primer) + "\n")
+    print(f"{len(active)} active thread(s) since {cutoff.date()} "
+          f"(newest activity {latest.date()}, window {args.days}d) -> {out_dir}")
+    if active:
+        print("Optional: distill each primer with prompts/resume.md.")
+
+
 def cmd_assemble(args) -> None:
     work = Path(args.work)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = json.loads((work / "manifest.json").read_text())
 
+    max_chars = getattr(args, "max_chars", 0) or 0
     index = ["# Project knowledge index", ""]
     for proj in manifest["projects"]:
         pslug = proj["slug"]
-        doc = [f"# {proj['name']} — chat knowledge", ""]
+        header = [f"# {proj['name']} — chat knowledge", ""]
         if proj.get("description"):
-            doc.append(proj["description"] + "\n")
-        doc.append(
+            header.append(proj["description"] + "\n")
+        header.append(
             f"_{len(proj['chats'])} chats"
             + (f" | project created {proj['created_at'][:10]}" if proj.get("created_at") else "")
             + "_\n"
         )
-        doc.append("## Contents\n")
         # Anchor = slug + uuid prefix so chats sharing a title link distinctly.
         anchor = {c["uuid"]: f"{slugify(c['title'])}-{c['uuid'][:8]}" for c in proj["chats"]}
-        for c in proj["chats"]:
-            doc.append(f"- [{c['title']}](#{anchor[c['uuid']]}) — {c['created_at'][:10]}")
-        doc.append("")
 
         missing = []
+        sections: list[tuple[dict[str, Any], str]] = []
         for c in proj["chats"]:
             brief_path = work / c["brief"]
-            doc.append(f'\n<a id="{anchor[c["uuid"]]}"></a>\n')
-            doc.append(f"## {c['title']}")
-            doc.append(f"_{c['created_at'][:10]} · chat uuid {c['uuid']}_\n")
+            lines = [f'\n<a id="{anchor[c["uuid"]]}"></a>\n',
+                     f"## {c['title']}",
+                     f"_{c['created_at'][:10]} · chat uuid {c['uuid']}_\n"]
             if brief_path.exists():
-                doc.append(demote_headings(brief_path.read_text().strip()))
+                lines.append(demote_headings(brief_path.read_text().strip()))
             else:
                 missing.append(c["brief"])
-                doc.append("_(brief not yet generated)_")
-        doc_path = out_dir / f"{pslug}.md"
-        doc_path.write_text("\n".join(doc) + "\n")
+                lines.append("_(brief not yet generated)_")
+            sections.append((c, "\n".join(lines)))
+
+        # Split along chat boundaries when a size budget is set (--max-chars),
+        # so no doc exceeds the destination's upload limit. Every part keeps
+        # the shared header and its own contents list.
+        parts: list[list[tuple[dict[str, Any], str]]] = [[]]
+        size = 0
+        for sec in sections:
+            if max_chars and parts[-1] and size + len(sec[1]) > max_chars:
+                parts.append([])
+                size = 0
+            parts[-1].append(sec)
+            size += len(sec[1])
+
+        for i, part in enumerate(parts, start=1):
+            suffix = f"-{i}" if len(parts) > 1 else ""
+            part_note = f" (part {i}/{len(parts)})" if len(parts) > 1 else ""
+            doc = [header[0] + part_note] + header[1:]
+            doc.append("## Contents\n")
+            for c, _ in part:
+                doc.append(f"- [{c['title']}](#{anchor[c['uuid']]}) — {c['created_at'][:10]}")
+            doc.append("")
+            doc.extend(text for _, text in part)
+            doc_path = out_dir / f"{pslug}{suffix}.md"
+            content = "\n".join(doc) + "\n"
+            doc_path.write_text(content)
+            kb_size = max(1, len(content) // 1024)
+            warn = f"  ⚠ {len(missing)} brief(s) missing" if missing and i == 1 else ""
+            index.append(f"- [{proj['name']}{part_note}]({pslug}{suffix}.md) — "
+                         f"{len(part)} chats, {kb_size} KB{warn}")
+            print(f"Assembled {proj['name']}{part_note}: {doc_path} ({kb_size} KB)"
+                  + (f"  (⚠ {len(missing)} briefs missing)" if missing and i == 1 else ""))
+            if max_chars and len(content) > max_chars:
+                print(f"  ⚠ {doc_path.name} still exceeds --max-chars "
+                      f"({len(content)} > {max_chars}): a single chat brief is "
+                      "bigger than the budget.")
 
         # Memory block: fresh cross-chat synthesis (if generated) first, then
         # the export's curated memory, then the folded-chat index.
@@ -758,10 +843,17 @@ def cmd_assemble(args) -> None:
             mem.append(f"- {c['title']} ({c['created_at'][:10]})")
         (out_dir / f"{pslug}.memory.md").write_text("\n".join(mem) + "\n")
 
-        index.append(f"- [{proj['name']}]({pslug}.md) — {len(proj['chats'])} chats"
-                     + (f"  ⚠ {len(missing)} brief(s) missing" if missing else ""))
-        print(f"Assembled {proj['name']}: {doc_path}"
-              + (f"  (⚠ {len(missing)} briefs missing)" if missing else ""))
+    # Portable persona: a global "about me / how to work with me" block
+    # synthesized by Claude Code (prompts/persona.md) into work/_persona.md.
+    persona_src = work / "_persona.md"
+    if persona_src.exists():
+        text = persona_src.read_text().strip() + "\n"
+        (out_dir / "persona.md").write_text(text)
+        words = len(text.split())
+        index.append(f"- [persona.md](persona.md) — {words} words")
+        print(f"Persona: {out_dir / 'persona.md'} ({words} words)"
+              + ("  ⚠ long for a preferences field — consider trimming to ~500 words"
+                 if words > 800 else ""))
 
     (out_dir / "index.md").write_text("\n".join(index) + "\n")
     print(f"Index: {out_dir / 'index.md'}")
@@ -804,6 +896,17 @@ def main() -> None:
     p_prep.add_argument("--out", default="work")
     p_prep.set_defaults(func=cmd_prepare)
 
+    p_res = sub.add_parser("resume",
+                           help="write resume-primers for recently active threads")
+    p_res.add_argument("--export", required=True)
+    p_res.add_argument("--days", type=int, default=14,
+                       help="active = updated within this many days of the "
+                            "export's newest activity")
+    p_res.add_argument("--tail", type=int, default=8,
+                       help="how many trailing messages to include")
+    p_res.add_argument("--out", default="resume")
+    p_res.set_defaults(func=cmd_resume)
+
     p_scrub = sub.add_parser("scrub",
                              help="scan prepared transcripts for secrets/PII")
     p_scrub.add_argument("--work", default="work")
@@ -814,6 +917,9 @@ def main() -> None:
     p_asm = sub.add_parser("assemble", help="combine briefs into docs + memory blocks")
     p_asm.add_argument("--work", default="work")
     p_asm.add_argument("--out", default="out")
+    p_asm.add_argument("--max-chars", type=int, default=0, dest="max_chars",
+                       help="split knowledge docs that exceed this many characters "
+                            "(0 = never split; sizes are always reported)")
     p_asm.set_defaults(func=cmd_assemble)
 
     args = parser.parse_args()

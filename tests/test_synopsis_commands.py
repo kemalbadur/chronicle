@@ -113,3 +113,60 @@ def test_scrub_clean_tree(tmp_path):
     (work / "ok.md").write_text("nothing sensitive here\n")
     synopsis.cmd_scrub(ns(work=str(work), apply=False))
     assert "No matches" in (work / "scrub-report.md").read_text()
+
+
+def make_work(tmp_path, briefs=("b1",), persona=False):
+    """A minimal work/ dir: one project, chats c1/c2, briefs as requested."""
+    work = tmp_path / "work"
+    (work / "proj").mkdir(parents=True)
+    manifest = {"projects": [{
+        "name": "Proj", "slug": "proj", "uuid": "p-1", "description": "About proj.",
+        "created_at": "2026-05-01T00:00:00Z", "updated_at": "", "project_memory": "",
+        "chats": [
+            {"uuid": "11111111-aaaa-4aaa-8aaa-111111111111", "title": "Chat One",
+             "slug": "c1", "created_at": "2026-05-01T00:00:00Z", "updated_at": "",
+             "transcript": "proj/c1.transcript.md", "brief": "proj/c1.brief.md"},
+            {"uuid": "22222222-bbbb-4bbb-8bbb-222222222222", "title": "Chat Two",
+             "slug": "c2", "created_at": "2026-05-02T00:00:00Z", "updated_at": "",
+             "transcript": "proj/c2.transcript.md", "brief": "proj/c2.brief.md"},
+        ]}]}
+    (work / "manifest.json").write_text(json.dumps(manifest))
+    if "b1" in briefs:
+        (work / "proj" / "c1.brief.md").write_text("Brief one. " * 40)
+    if "b2" in briefs:
+        (work / "proj" / "c2.brief.md").write_text("Brief two. " * 40)
+    if persona:
+        (work / "_persona.md").write_text("# About me\n- concise\n")
+    return work
+
+
+def test_assemble_reports_sizes_and_missing(tmp_path, capsys):
+    work = make_work(tmp_path)
+    out = tmp_path / "out"
+    synopsis.cmd_assemble(ns(work=str(work), out=str(out), max_chars=0))
+    index = (out / "index.md").read_text()
+    assert "KB" in index and "1 brief(s) missing" in index
+    assert (out / "proj.md").exists() and (out / "proj.memory.md").exists()
+
+
+def test_assemble_splits_on_budget_and_copies_persona(tmp_path, capsys):
+    work = make_work(tmp_path, briefs=("b1", "b2"), persona=True)
+    out = tmp_path / "out"
+    synopsis.cmd_assemble(ns(work=str(work), out=str(out), max_chars=500))
+    assert (out / "proj-1.md").exists() and (out / "proj-2.md").exists()
+    assert not (out / "proj.md").exists()
+    p1 = (out / "proj-1.md").read_text()
+    assert "part 1/2" in p1 and "Chat One" in p1 and "Chat Two" not in p1
+    assert (out / "persona.md").read_text().startswith("# About me")
+    assert "persona.md" in (out / "index.md").read_text()
+
+
+def test_resume_writes_primers_for_active_threads(claude_zip, tmp_path, capsys):
+    out = tmp_path / "resume"
+    # Sample chats span 2026-05-02..05-09; a 3-day window keeps only the crest chat.
+    synopsis.cmd_resume(ns(export=str(claude_zip), days=3, tail=1, out=str(out)))
+    files = list(out.glob("*.resume.md"))
+    assert len(files) == 1 and "a-crest-for-the-maroons" in files[0].name
+    body = files[0].read_text()
+    assert body.startswith("# Resume: A crest for the Maroons")
+    assert "the last 1 of 2 messages" in body and "How to use:" in body
