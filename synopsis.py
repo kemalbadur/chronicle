@@ -155,11 +155,18 @@ def demote_headings(markdown: str) -> str:
     """Shift ATX headings down one level (## -> ###) so a brief nests under
     its chat title. Skips lines inside fenced code blocks."""
     out: list[str] = []
-    in_fence = False
+    fence: str | None = None  # the marker that opened the current code block
     for line in markdown.splitlines():
-        if re.match(r"^\s*(```|~~~)", line):
-            in_fence = not in_fence
-        elif not in_fence:
+        m_fence = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if m_fence:
+            marker = m_fence.group(1)
+            if fence is None:
+                fence = marker
+            # Per CommonMark, only a same-char fence at least as long closes it,
+            # so a ``` line inside a ~~~ block stays literal (and vice versa).
+            elif marker[0] == fence[0] and len(marker) >= len(fence):
+                fence = None
+        elif fence is None:
             m = re.match(r"^(#{1,5}) (?=\S)", line)
             if m:
                 line = "#" + line
@@ -215,11 +222,18 @@ def parse_listing(path: Path) -> list[dict[str, str | None]]:
     """Extract {title, uuid, date} rows from a project listing .md file.
 
     Handles Markdown tables (any column order) and `N. Title — date` lists.
+
+    Caveat: in a table row, the *longest* cell that isn't a date, number, URL,
+    or known header is assumed to be the title — a long free-text column (e.g.
+    "notes") can steal it. The build-map match report surfaces the resulting
+    unmatched/ambiguous rows, so check it after running.
     """
     rows: list[dict[str, str | None]] = []
     for line in path.read_text().splitlines():
         s = line.strip()
-        uu = UUID_RE.search(s) or re.search(
+        # (Not UUID_RE: its anchored repeated group would make group(1) just
+        # the last "-xxxx" chunk on a bare-uuid line.)
+        uu = re.search(
             r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", s, re.I)
         uuid = uu.group(1).lower() if uu else None
         title: str | None = None
@@ -466,14 +480,16 @@ def cmd_assemble(args) -> None:
             + "_\n"
         )
         doc.append("## Contents\n")
+        # Anchor = slug + uuid prefix so chats sharing a title link distinctly.
+        anchor = {c["uuid"]: f"{slugify(c['title'])}-{c['uuid'][:8]}" for c in proj["chats"]}
         for c in proj["chats"]:
-            doc.append(f"- [{c['title']}](#{slugify(c['title'])}) — {c['created_at'][:10]}")
+            doc.append(f"- [{c['title']}](#{anchor[c['uuid']]}) — {c['created_at'][:10]}")
         doc.append("")
 
         missing = []
         for c in proj["chats"]:
             brief_path = work / c["brief"]
-            doc.append(f'\n<a id="{slugify(c["title"])}"></a>\n')
+            doc.append(f'\n<a id="{anchor[c["uuid"]]}"></a>\n')
             doc.append(f"## {c['title']}")
             doc.append(f"_{c['created_at'][:10]} · chat uuid {c['uuid']}_\n")
             if brief_path.exists():
