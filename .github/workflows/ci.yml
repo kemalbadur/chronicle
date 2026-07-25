@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    name: viewer freshness + tests + lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The committed conversations-viewer.html must match its template (issue #14).
+      - name: standalone viewer is up to date
+        run: |
+          python build_standalone.py
+          git diff --exit-code conversations-viewer.html
+      - name: install
+        run: pip install -e ".[server,dev]"
+      - name: tests
+        run: python -m pytest -q
+      - name: lint
+        run: ruff check .
