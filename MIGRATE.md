@@ -31,6 +31,20 @@ your history first — fully local.)
 
 ## Step 2 — List each project's chats
 
+**Shortcut (Claude exports):** let the tool draft the mapping for you, then
+just review it:
+
+```bash
+python synopsis.py propose-map --export your-export.zip --out map.json
+```
+
+It scores every chat against your projects' names/descriptions/documents and
+writes the map plus `map.report.md` with a confidence margin per chat —
+correct the low-margin rows and anything unassigned (or have Claude Code
+review it with `prompts/propose-map.md`), then skip to Step 4. For ChatGPT
+exports (no projects in the zip) or when the draft isn't good enough, do it
+manually:
+
 For each project, capture its chat list into `project_listings/<Project Name>.md`.
 The easy way: open the project on claude.ai (or ChatGPT), start a new chat
 inside it, and paste the prompt in [`prompts/capture-chat-list.md`](prompts/capture-chat-list.md).
@@ -63,6 +77,21 @@ python synopsis.py prepare --export your-export.zip --map map.json --out work
 ```
 
 This writes one full transcript per chat under `work/<project>/`.
+
+## Step 4½ — Scrub secrets before anything moves (recommended)
+
+Old chats accumulate API keys, salaries, other people's names. Scan the
+transcripts before summaries get written and uploaded:
+
+```bash
+python synopsis.py scrub --work work            # report only
+python synopsis.py scrub --work work --apply    # redact in place after review
+```
+
+`work/scrub-report.md` lists every match (AWS/GitHub/API keys, private-key
+blocks, emails, phones, ...). For judgment calls regexes can't make (health,
+employment, third parties), run the model pass in `prompts/scrub.md` from
+Claude Code.
 
 ## Step 5 — Generate the briefs (Claude Code)
 
@@ -98,16 +127,27 @@ memory synthesis (themes, key facts, people, decisions, open questions). Base it
 only on the briefs.
 ```
 
+## Step 6½ — Portable persona (optional, but it's what you'll miss most)
+
+Per-project memory misses the cross-cutting layer: how you like answers, the
+corrections you keep giving, your stack and voice. In Claude Code, run the
+prompt in [`prompts/persona.md`](prompts/persona.md) over the whole history —
+it writes `work/_persona.md`, and Step 7 copies it to `out/persona.md`, ready
+to paste into the new assistant's preferences / custom instructions.
+
 ## Step 7 — Assemble the deliverables
 
 ```bash
 python synopsis.py assemble --work work --out out
+# add --max-chars 300000 to auto-split docs that exceed an upload limit
 ```
 
 You now have, in `out/`:
-- `<project>.md` — the full knowledge document (a brief per chat, with a table of contents)
+- `<project>.md` — the full knowledge document (a brief per chat, with a table
+  of contents; split into `<project>-1.md`, `-2.md`, ... if `--max-chars` is set)
 - `<project>.memory.md` — the memory block (synthesis + folded-chat index)
-- `index.md` — links to every project
+- `persona.md` — the global persona block (if you did Step 6½)
+- `index.md` — links to every document, with sizes
 
 ## Step 8 — Import into Claude Enterprise (or anywhere)
 
@@ -120,6 +160,23 @@ The files are plain Markdown, so the same documents work as knowledge/context in
 any other tool.
 
 ---
+
+## Beyond the knowledge docs
+
+Three more tools for getting value out of the same export:
+
+- **Live archive instead of (or alongside) summaries** — serve the whole
+  indexed history to any MCP client, fully local:
+  `pip install ".[mcp]" && python build_index.py && python mcp_server.py`
+  (config snippet in `mcp_server.py`'s docstring). The new assistant can then
+  *search* your past instead of relying on what was folded into memory.
+- **Pick up mid-flight threads** — `python synopsis.py resume --export
+  your-export.zip` writes a paste-ready primer for every recently active
+  conversation; distill them with `prompts/resume.md`.
+- **Recover generated documents** — the export stores the *code* that built
+  your Word/Excel/PDF files, not the files. `python synopsis.py rehydrate
+  --export your-export.zip` extracts those scripts; add `--run` to execute
+  them locally and get the documents back (read the warning it prints).
 
 ### Notes
 

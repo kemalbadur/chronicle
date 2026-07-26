@@ -21,7 +21,7 @@ with "no_response": true.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 ROOT_PARENT = "00000000-0000-4000-8000-000000000000"
@@ -41,7 +41,7 @@ def _iso(t: Any) -> str:
     if isinstance(t, str):
         return t
     return (
-        datetime.fromtimestamp(t, tz=timezone.utc)
+        datetime.fromtimestamp(t, tz=UTC)
         .isoformat(timespec="seconds")
         .replace("+00:00", "Z")
     )

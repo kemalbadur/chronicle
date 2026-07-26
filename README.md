@@ -136,22 +136,52 @@ into a fresh Claude Enterprise account (or any other tool). A Claude export
 has every chat but no record of which chats belonged to which project, so
 there's one manual step (you map chats → projects); the rest is automated.
 
-The pipeline (full walkthrough in **[MIGRATE.md](MIGRATE.md)**):
+The pipeline (full walkthrough in **[MIGRATE.md](MIGRATE.md)**) works on
+**Claude and ChatGPT exports** alike:
 
-1. **`list`** — dump every chat in the export to review it.
-2. **map** — tell the tool which chats belong to which project (via
-   `project_listings/`), then **`build-map`** resolves them.
-3. **`prepare`** — extract one full transcript per chat.
+1. **map** — **`propose-map`** drafts the chat→project mapping automatically
+   (with a confidence report to review), or list chats yourself with
+   **`list`** + `project_listings/` and resolve via **`build-map`**.
+2. **`prepare`** — extract one full transcript per chat.
+3. **`scrub`** — scan the transcripts for secrets/PII before anything moves
+   (report first, `--apply` to redact).
 4. **briefs** — Claude Code summarizes each transcript into a `.brief.md`
    (pick a style in `prompts/`).
-5. **synthesis** — Claude Code writes a cross-chat memory block per project.
-6. **`assemble`** — produces `out/<project>.md` (knowledge doc) and
-   `out/<project>.memory.md` (memory) per project.
+5. **synthesis** — Claude Code writes a cross-chat memory block per project,
+   and optionally a global **persona** block (`prompts/persona.md`).
+6. **`assemble`** — produces `out/<project>.md` (knowledge doc, auto-split
+   with `--max-chars`), `out/<project>.memory.md` (memory), and
+   `out/persona.md`.
+
+Also in the toolbox: **`resume`** (paste-ready primers for threads you were
+in the middle of), **`rehydrate`** (recover generated Word/Excel/PDF files by
+re-running their stored generator scripts — opt-in `--run`), and **`export`**
+(write any supported zip in the canonical format, see
+**[FORMAT.md](FORMAT.md)**, with an optional Markdown cold-storage archive).
 
 Then, in the new account: create the project, upload `<project>.md` as project
 knowledge, and paste `<project>.memory.md` into its instructions. The
 summarizing runs in your own Claude Code — nothing is uploaded until you import
 it. *(Requires [Claude Code](https://claude.com/claude-code).)*
+
+---
+
+## MCP server: your archive as live memory
+
+Instead of only migrating summaries, you can serve the full indexed history
+to any MCP client (Claude Desktop, Claude Code, ...) — everything stays on
+your machine:
+
+```sh
+pip install ".[mcp]"
+python build_index.py        # builds conversations.db from conversations.json
+python mcp_server.py         # stdio MCP server over the database
+```
+
+Tools exposed: `search` (full-text, ranked, covers artifact and attachment
+content), `list_conversations`, `get_conversation` (Markdown transcript),
+`list_artifacts` / `get_artifact`, `stats`. Client config snippet is in
+`mcp_server.py`'s docstring.
 
 ---
 
@@ -205,7 +235,10 @@ viewer (see above); they are not part of the server UI.
 | `build_index.py` | Parses the JSON export into `conversations.db` (SQLite + FTS5). |
 | `app.py` | Flask server: `/`, `/api/conversations`, `/api/search`, `/api/conversation/<uuid>`, `/api/stats`. |
 | `templates/index.html` | Single-page UI (no build step). |
-| `synopsis.py` | Migration tool: `list` / `build-map` / `prepare` / `assemble` (see [MIGRATE.md](MIGRATE.md)). |
+| `synopsis.py` | Migration tool: `list` / `propose-map` / `build-map` / `prepare` / `scrub` / `assemble` / `resume` / `rehydrate` / `export` (see [MIGRATE.md](MIGRATE.md)). |
+| `chatgpt_export.py` | Normalizes ChatGPT exports into the canonical schema ([FORMAT.md](FORMAT.md)). |
+| `store.py` | Read-only query layer over `conversations.db`. |
+| `mcp_server.py` | MCP server exposing the archive to any MCP client. Needs `pip install ".[mcp]"`. |
 | `prompts/` | Copy-paste prompts: capture a project's chat list, and the brief/synthesis styles. |
 | `build_userguide.py` | Generates the Word user guide, "Chronicle - User Guide.docx". Needs `pip install ".[docs]"`. |
 
