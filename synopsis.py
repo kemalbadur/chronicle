@@ -38,6 +38,7 @@ from typing import Any
 
 # Reuse the export's block-extraction helpers rather than re-implement them.
 from build_index import _join_blocks, _tool_names
+from chatgpt_export import chatgpt_to_claude, looks_like_chatgpt
 
 CARD_TOOLS = {"artifacts", "create_file"}
 UUID_RE = re.compile(r"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$", re.I)
@@ -47,15 +48,31 @@ UUID_RE = re.compile(r"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$", re.I)
 # Export reading
 # --------------------------------------------------------------------------- #
 def load_export(zip_path: Path) -> dict[str, Any]:
-    """Read the parts of the export we need into memory."""
+    """Read the parts of the export we need into memory.
+
+    Accepts a Claude export (conversations.json [+ projects/, memories.json])
+    or a ChatGPT export (conversations.json, possibly split into
+    conversations-000.json, ...), which is normalized to the Claude shape.
+    """
     if not zip_path.exists():
         sys.exit(f"Export not found: {zip_path}")
     with zipfile.ZipFile(zip_path) as zf:
         names = set(zf.namelist())
-        if "conversations.json" not in names:
-            sys.exit("conversations.json not found in export (is this a Claude export?)")
-        with zf.open("conversations.json") as fh:
-            conversations = json.load(fh)
+        conv_names = sorted(
+            n for n in names
+            if re.fullmatch(r"(?:[^/]+/)?conversations(-\d+)?\.json", n)
+        )
+        if not conv_names:
+            sys.exit("No conversations file found in export "
+                     "(looked for conversations.json / conversations-000.json).")
+        conversations: list[dict[str, Any]] = []
+        for n in conv_names:
+            with zf.open(n) as fh:
+                part = json.load(fh)
+            if isinstance(part, list):
+                conversations.extend(part)
+        if looks_like_chatgpt(conversations):
+            conversations = chatgpt_to_claude(conversations)
         projects = []
         for name in names:
             if name.startswith("projects/") and name.endswith(".json"):
@@ -125,12 +142,19 @@ def render_transcript(conv: dict[str, Any]) -> str:
         for para in conv["summary"].split("\n"):
             lines.append(f"> {para}")
 
+    assistant = "ChatGPT" if conv.get("source") == "chatgpt" else "Claude"
     for seq, msg in enumerate(conv.get("chat_messages", [])):
         content = msg.get("content") or []
-        speaker = "You" if msg.get("sender") == "human" else "Claude"
+        speaker = "You" if msg.get("sender") == "human" else assistant
         lines.append(f"\n## [{seq}] {speaker}")
+        if msg.get("no_response"):
+            lines.append("_[Deep Research request — the result is not included "
+                         "in ChatGPT's export; only this prompt was saved.]_")
         for att in _render_attachments(msg):
             lines.append(att)
+        for f in msg.get("files") or []:
+            if f.get("file_name"):
+                lines.append(f"_[uploaded: {f['file_name']} — content not in export]_")
         body = _join_blocks(content, "text") or (msg.get("text") or "")
         if body.strip():
             lines.append(body)
@@ -316,6 +340,332 @@ def project_meta_for(name: str, projects: list[dict[str, Any]]):
 
 
 # --------------------------------------------------------------------------- #
+# Rehydrate: recover generated documents by re-running docgen scripts
+# --------------------------------------------------------------------------- #
+# Same detector the viewer uses for its "this is code, not the document" note.
+DOCGEN = re.compile(
+    r"(require\(['\"]docx|from docx import|pptxgenjs|require\(['\"]exceljs"
+    r"|require\(['\"]xlsx|openpyxl|reportlab|require\(['\"]pdfkit|from pptx import)",
+    re.I,
+)
+
+
+def _doc_kind(text: str) -> str:
+    if re.search(r"docx", text, re.I):
+        return "Word (.docx)"
+    if re.search(r"pptx", text, re.I):
+        return "PowerPoint (.pptx)"
+    if re.search(r"exceljs|xlsx|openpyxl", text, re.I):
+        return "Excel (.xlsx)"
+    if re.search(r"reportlab|pdfkit", text, re.I):
+        return "PDF"
+    return "document"
+
+
+def _script_lang(text: str) -> str:
+    if re.search(r"require\(['\"]|module\.exports|pptxgenjs", text):
+        return "js"
+    if re.search(r"^\s*(from|import)\s+\w+", text, re.M):
+        return "py"
+    return "txt"
+
+
+def find_docgen_scripts(conversations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Document-generator scripts across all chats, deduped by (chat, title)
+    keeping the last (most recent) full version."""
+    found: dict[tuple[str, str], dict[str, Any]] = {}
+    for conv in conversations:
+        for msg in conv.get("chat_messages", []):
+            for block in msg.get("content") or []:
+                if block.get("type") != "tool_use":
+                    continue
+                inp = block.get("input") or {}
+                if block.get("name") == "artifacts":
+                    text = inp.get("content") or ""   # full versions only
+                    title = inp.get("title") or inp.get("id") or "artifact"
+                elif block.get("name") == "create_file":
+                    text = inp.get("file_text") or ""
+                    title = (inp.get("path") or "file").rsplit("/", 1)[-1]
+                else:
+                    continue
+                if not text or not DOCGEN.search(text):
+                    continue
+                found[(conv["uuid"], title)] = {
+                    "conv_uuid": conv["uuid"],
+                    "conv_name": conv.get("name") or "(untitled)",
+                    "conv_slug": chat_slug(conv),
+                    "title": title,
+                    "text": text,
+                    "kind": _doc_kind(text),
+                    "lang": _script_lang(text),
+                }
+    return list(found.values())
+
+
+def cmd_rehydrate(args) -> None:
+    import subprocess
+
+    data = load_export(Path(args.export))
+    scripts = find_docgen_scripts(data["conversations"])
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if not scripts:
+        print("No document-generator scripts found in this export.")
+        return
+    if args.run:
+        print("⚠ --run executes code that was stored in your export. Only do "
+              "this with your own history, and expect failures where scripts "
+              "need packages (docx, pptxgenjs, ...) you haven't installed.")
+    report = ["# Rehydrate report", "",
+              f"_{len(scripts)} document-generator script(s) found._", ""]
+    ran = ok = 0
+    for s in scripts:
+        sdir = out_dir / s["conv_slug"]
+        sdir.mkdir(parents=True, exist_ok=True)
+        base = slugify(s["title"]) or "script"
+        ext = {"js": ".js", "py": ".py"}.get(s["lang"], ".txt")
+        spath = sdir / f"{base}{ext}"
+        n = 2
+        while spath.exists() and spath.read_text() != s["text"]:
+            spath = sdir / f"{base}-{n}{ext}"
+            n += 1
+        spath.write_text(s["text"])
+        report.append(f"## {s['title']}  ({s['kind']})")
+        report.append(f"- from chat: {s['conv_name']}")
+        report.append(f"- script: `{spath.relative_to(out_dir)}`")
+        if args.run and ext != ".txt":
+            ran += 1
+            runner = ["node", spath.name] if ext == ".js" else [sys.executable, spath.name]
+            before = {p.name for p in sdir.iterdir()}
+            try:
+                proc = subprocess.run(
+                    runner, cwd=sdir, capture_output=True, text=True,
+                    timeout=args.timeout,
+                )
+                log = proc.stdout + proc.stderr
+                status = "ok" if proc.returncode == 0 else f"exit {proc.returncode}"
+            except FileNotFoundError:
+                log, status = f"{runner[0]} not installed", "no runtime"
+            except subprocess.TimeoutExpired:
+                log, status = f"timed out after {args.timeout}s", "timeout"
+            spath.with_suffix(spath.suffix + ".log").write_text(log)
+            created = sorted(
+                p for p in ({q.name for q in sdir.iterdir()} - before)
+                if not p.endswith(".log")
+            )
+            if status == "ok":
+                ok += 1
+                report.append(f"- **ran ok** — created: "
+                              f"{', '.join(created) if created else '(no new files)'}")
+            else:
+                report.append(f"- **failed** ({status}) — see "
+                              f"`{spath.relative_to(out_dir)}.log`")
+        elif args.run:
+            report.append("- skipped (could not tell if Node or Python)")
+        report.append("")
+    (out_dir / "rehydrate-report.md").write_text("\n".join(report) + "\n")
+    summary = (f"{ok}/{ran} script(s) ran clean; " if args.run else "")
+    print(f"{len(scripts)} script(s) extracted -> {out_dir}. "
+          f"{summary}Report: {out_dir / 'rehydrate-report.md'}")
+    if not args.run:
+        print("Nothing was executed. Re-run with --run to regenerate the "
+              "documents (needs node / the scripts' packages installed).")
+
+
+# --------------------------------------------------------------------------- #
+# Scrub: secret/PII detection over prepared transcripts
+# --------------------------------------------------------------------------- #
+# Order matters: more specific patterns first (sk-ant- before sk-).
+SCRUB_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("private-key-block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("aws-access-key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("github-token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
+    ("anthropic-key", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}")),
+    ("openai-key", re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b")),
+    ("slack-token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
+    ("jwt", re.compile(
+        r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{5,}\b")),
+    ("secret-assignment", re.compile(
+        r"(?i)\b(?:api[_-]?key|secret|token|passwd|password)\b\s*[:=]\s*"
+        r"['\"]?[A-Za-z0-9_\-/+.]{12,}")),
+    ("email", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")),
+    ("phone", re.compile(r"\+\d[\d ().-]{7,}\d")),
+]
+
+
+def scrub_text(text: str) -> tuple[str, list[dict[str, Any]]]:
+    """Return (redacted_text, findings). Findings carry line/type/preview."""
+    findings: list[dict[str, Any]] = []
+    for kind, pat in SCRUB_PATTERNS:
+        for m in pat.finditer(text):
+            token = m.group()
+            findings.append({
+                "type": kind,
+                "line": text.count("\n", 0, m.start()) + 1,
+                "preview": token[:6] + "…" if len(token) > 9 else token[:3] + "…",
+            })
+        text = pat.sub(f"[REDACTED-{kind}]", text)
+    return text, findings
+
+
+def cmd_scrub(args) -> None:
+    work = Path(args.work)
+    paths = sorted(p for p in work.rglob("*.md") if not p.name.startswith("scrub-"))
+    if not paths:
+        sys.exit(f"No .md files under {work} — run `prepare` first.")
+    report = ["# Scrub report", "",
+              "Matches found by pattern scan. **Review before uploading anything.**",
+              "Re-run with `--apply` to redact these in place.", ""]
+    total = 0
+    for path in paths:
+        original = path.read_text()
+        redacted, findings = scrub_text(original)
+        if not findings:
+            continue
+        total += len(findings)
+        report.append(f"## {path.relative_to(work)}")
+        for f in findings:
+            report.append(f"- line {f['line']}: **{f['type']}** `{f['preview']}`")
+        report.append("")
+        if args.apply:
+            path.write_text(redacted)
+    if total == 0:
+        report.append("_No matches found._")
+    report_path = work / "scrub-report.md"
+    report_path.write_text("\n".join(report) + "\n")
+    action = "redacted in place" if args.apply else "found (nothing changed)"
+    print(f"{total} match(es) {action}. Report: {report_path}")
+    if total and not args.apply:
+        print("Review the report, then: python synopsis.py scrub --work "
+              f"{work} --apply")
+    print("For judgment calls regexes can't make (names, health, salary), "
+          "run a model pass with prompts/scrub.md.")
+
+
+# --------------------------------------------------------------------------- #
+# Map proposal (lexical scoring, no model, no network)
+# --------------------------------------------------------------------------- #
+_STOP = frozenset(
+    "a an and are as at be but by for from has have i if in is it its me my of on or "
+    "so that the this to was we what when which with you your can could should would "
+    "do does did how not no yes just like get make want need help please also".split()
+)
+
+
+def _tokens(text: str) -> list[str]:
+    return [t for t in re.findall(r"[a-z0-9]{3,}", (text or "").lower()) if t not in _STOP]
+
+
+def _chat_text(conv: dict[str, Any], max_chars: int = 4000) -> str:
+    """Title (weighted by repetition) + the first stretch of message text."""
+    parts = [(conv.get("name") or "") * 3]
+    total = 0
+    for m in conv.get("chat_messages", []):
+        body = _join_blocks(m.get("content") or [], "text") or (m.get("text") or "")
+        parts.append(body[: max_chars - total])
+        total += len(body)
+        if total >= max_chars:
+            break
+    return "\n".join(parts)
+
+
+def propose_map(
+    conversations: list[dict[str, Any]],
+    projects: list[dict[str, Any]],
+    min_score: float = 0.05,
+) -> tuple[dict[str, list[str]], list[dict[str, Any]]]:
+    """Score every chat against every project profile; return (draft_map, rows).
+
+    Cosine similarity over IDF-weighted term counts. Each row carries the
+    top-2 candidates and a confidence margin so a human can review the
+    low-margin assignments. Purely lexical — a reviewable first draft, not
+    a decision.
+    """
+    import math
+    from collections import Counter
+
+    chat_tokens = {c["uuid"]: Counter(_tokens(_chat_text(c))) for c in conversations}
+    # IDF over the chat corpus (projects share it; smooth for unseen terms).
+    n_docs = max(1, len(chat_tokens))
+    df: Counter = Counter()
+    for toks in chat_tokens.values():
+        df.update(set(toks))
+    idf = {t: math.log((1 + n_docs) / (1 + d)) + 1 for t, d in df.items()}
+
+    def vec(counts: Counter) -> dict[str, float]:
+        return {t: n * idf.get(t, 1.0) for t, n in counts.items()}
+
+    def cosine(a: dict[str, float], b: dict[str, float]) -> float:
+        if not a or not b:
+            return 0.0
+        dot = sum(w * b[t] for t, w in a.items() if t in b)
+        na = math.sqrt(sum(w * w for w in a.values()))
+        nb = math.sqrt(sum(w * w for w in b.values()))
+        return dot / (na * nb) if na and nb else 0.0
+
+    proj_vecs: dict[str, dict[str, float]] = {}
+    for p in projects:
+        profile = "\n".join(
+            [(p.get("name") or "") * 3, p.get("description") or "",
+             p.get("prompt_template") or ""]
+            + [f"{d.get('filename') or ''}\n{d.get('content') or ''}"
+               for d in p.get("docs") or []]
+        )
+        proj_vecs[(p.get("name") or "").strip()] = vec(Counter(_tokens(profile)))
+
+    draft: dict[str, list[str]] = {name: [] for name in proj_vecs}
+    rows: list[dict[str, Any]] = []
+    for c in conversations:
+        cv = vec(chat_tokens[c["uuid"]])
+        scored = sorted(
+            ((cosine(cv, pv), name) for name, pv in proj_vecs.items()), reverse=True
+        )
+        best_score, best = scored[0] if scored else (0.0, "")
+        second = scored[1] if len(scored) > 1 else (0.0, "")
+        assigned = best if best_score >= min_score else ""
+        if assigned:
+            draft[assigned].append(c["uuid"])
+        rows.append({
+            "uuid": c["uuid"], "title": c.get("name") or "(untitled)",
+            "assigned": assigned, "score": round(best_score, 3),
+            "runner_up": second[1], "runner_up_score": round(second[0], 3),
+            "margin": round(best_score - second[0], 3),
+        })
+    return draft, rows
+
+
+def cmd_propose_map(args) -> None:
+    data = load_export(Path(args.export))
+    if not data["projects"]:
+        sys.exit("No projects/ in this export — nothing to score against. "
+                 "(ChatGPT exports have no projects; use project_listings/ + build-map.)")
+    draft, rows = propose_map(data["conversations"], data["projects"], args.min_score)
+    Path(args.out).write_text(json.dumps(draft, indent=2))
+    report_path = Path(args.out).with_suffix(".report.md")
+    lines = [
+        "# propose-map report", "",
+        "Lexical draft — **review before use**. Low-margin rows are guesses.",
+        "", "| assigned | score | margin | runner-up | title |",
+        "|----------|-------|--------|-----------|-------|",
+    ]
+    for r in sorted(rows, key=lambda r: (r["assigned"] == "", -r["margin"])):
+        lines.append(
+            f"| {r['assigned'] or '—'} | {r['score']} | {r['margin']} "
+            f"| {r['runner_up']} ({r['runner_up_score']}) "
+            f"| {r['title'].replace('|', chr(92) + '|')} |"
+        )
+    unassigned = sum(1 for r in rows if not r["assigned"])
+    lines += ["", f"_{len(rows)} chats scored; {unassigned} left unassigned "
+              f"(score < {args.min_score})._"]
+    report_path.write_text("\n".join(lines) + "\n")
+    print(f"Draft map: {args.out} "
+          f"({sum(len(v) for v in draft.values())} assigned, {unassigned} unassigned)")
+    print(f"Review report: {report_path}")
+    print("Next: correct the draft by hand (or with prompts/propose-map.md), "
+          "then use it as your map for `prepare`.")
+
+
+# --------------------------------------------------------------------------- #
 # Commands
 # --------------------------------------------------------------------------- #
 def cmd_list(args) -> None:
@@ -346,6 +696,33 @@ def cmd_list(args) -> None:
         print(f"Wrote {args.out} ({len(convs)} chats)")
     else:
         print(out)
+
+
+def cmd_export(args) -> None:
+    """Write the export in the canonical format (FORMAT.md)."""
+    data = load_export(Path(args.export))
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    convs = data["conversations"]
+    (out_dir / "conversations.json").write_text(
+        json.dumps(convs, indent=2, ensure_ascii=False) + "\n"
+    )
+    print(f"Wrote {out_dir / 'conversations.json'} ({len(convs)} conversations)")
+    if args.markdown:
+        md_dir = out_dir / "markdown"
+        md_dir.mkdir(exist_ok=True)
+        index = ["# Conversation archive", ""]
+        used: set[str] = set()
+        for conv in sorted(convs, key=lambda c: c.get("created_at") or ""):
+            slug = chat_slug(conv)
+            if slug in used:
+                slug = f"{slug}-{str(conv.get('uuid'))[:8]}"
+            used.add(slug)
+            (md_dir / f"{slug}.md").write_text(render_transcript(conv))
+            index.append(f"- [{conv.get('name') or '(untitled)'}]({slug}.md) — "
+                         f"{(conv.get('created_at') or '')[:10]}")
+        (md_dir / "index.md").write_text("\n".join(index) + "\n")
+        print(f"Wrote {len(used)} transcripts -> {md_dir}")
 
 
 def cmd_build_map(args) -> None:
@@ -462,43 +839,128 @@ def cmd_prepare(args) -> None:
           "(Claude Code agents), then run `assemble`.")
 
 
+def cmd_resume(args) -> None:
+    """Write a resume-primer per recently active conversation."""
+    from datetime import datetime, timedelta
+
+    def parse_ts(s: str) -> datetime | None:
+        try:
+            return datetime.fromisoformat((s or "").replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    data = load_export(Path(args.export))
+    stamped = [(parse_ts(c.get("updated_at") or ""), c) for c in data["conversations"]]
+    stamped = [(t, c) for t, c in stamped if t is not None]
+    if not stamped:
+        sys.exit("No parseable timestamps in this export.")
+    # Cutoff is relative to the newest activity in the export, not to today —
+    # the export itself may be weeks old.
+    latest = max(t for t, _ in stamped)
+    cutoff = latest - timedelta(days=args.days)
+    active = sorted(((t, c) for t, c in stamped if t >= cutoff), reverse=True,
+                    key=lambda tc: tc[0])
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    used: set[str] = set()
+    for _, conv in active:
+        slug = chat_slug(conv)
+        if slug in used:
+            slug = f"{slug}-{conv['uuid'][:8]}"
+        used.add(slug)
+        msgs = conv.get("chat_messages", [])
+        tail = msgs[-args.tail:]
+        shown = (f"the last {len(tail)} of {len(msgs)} messages"
+                 if len(tail) < len(msgs) else f"all {len(msgs)} messages")
+        primer = [
+            f"# Resume: {conv.get('name') or '(untitled)'}",
+            f"_Last active {(conv.get('updated_at') or '')[:10]} · {shown} below_",
+            "",
+            "**How to use:** start a chat in your new assistant and paste "
+            "everything below, prefaced with: \"This is the tail of an earlier "
+            "conversation I want to continue. Read it and pick up where we "
+            "left off.\" (Or distill these files first with prompts/resume.md.)",
+            "",
+            "---",
+            "",
+            render_transcript({**conv, "chat_messages": tail}).rstrip(),
+        ]
+        (out_dir / f"{slug}.resume.md").write_text("\n".join(primer) + "\n")
+    print(f"{len(active)} active thread(s) since {cutoff.date()} "
+          f"(newest activity {latest.date()}, window {args.days}d) -> {out_dir}")
+    if active:
+        print("Optional: distill each primer with prompts/resume.md.")
+
+
 def cmd_assemble(args) -> None:
     work = Path(args.work)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = json.loads((work / "manifest.json").read_text())
 
+    max_chars = getattr(args, "max_chars", 0) or 0
     index = ["# Project knowledge index", ""]
     for proj in manifest["projects"]:
         pslug = proj["slug"]
-        doc = [f"# {proj['name']} — chat knowledge", ""]
+        header = [f"# {proj['name']} — chat knowledge", ""]
         if proj.get("description"):
-            doc.append(proj["description"] + "\n")
-        doc.append(
+            header.append(proj["description"] + "\n")
+        header.append(
             f"_{len(proj['chats'])} chats"
             + (f" | project created {proj['created_at'][:10]}" if proj.get("created_at") else "")
             + "_\n"
         )
-        doc.append("## Contents\n")
         # Anchor = slug + uuid prefix so chats sharing a title link distinctly.
         anchor = {c["uuid"]: f"{slugify(c['title'])}-{c['uuid'][:8]}" for c in proj["chats"]}
-        for c in proj["chats"]:
-            doc.append(f"- [{c['title']}](#{anchor[c['uuid']]}) — {c['created_at'][:10]}")
-        doc.append("")
 
         missing = []
+        sections: list[tuple[dict[str, Any], str]] = []
         for c in proj["chats"]:
             brief_path = work / c["brief"]
-            doc.append(f'\n<a id="{anchor[c["uuid"]]}"></a>\n')
-            doc.append(f"## {c['title']}")
-            doc.append(f"_{c['created_at'][:10]} · chat uuid {c['uuid']}_\n")
+            lines = [f'\n<a id="{anchor[c["uuid"]]}"></a>\n',
+                     f"## {c['title']}",
+                     f"_{c['created_at'][:10]} · chat uuid {c['uuid']}_\n"]
             if brief_path.exists():
-                doc.append(demote_headings(brief_path.read_text().strip()))
+                lines.append(demote_headings(brief_path.read_text().strip()))
             else:
                 missing.append(c["brief"])
-                doc.append("_(brief not yet generated)_")
-        doc_path = out_dir / f"{pslug}.md"
-        doc_path.write_text("\n".join(doc) + "\n")
+                lines.append("_(brief not yet generated)_")
+            sections.append((c, "\n".join(lines)))
+
+        # Split along chat boundaries when a size budget is set (--max-chars),
+        # so no doc exceeds the destination's upload limit. Every part keeps
+        # the shared header and its own contents list.
+        parts: list[list[tuple[dict[str, Any], str]]] = [[]]
+        size = 0
+        for sec in sections:
+            if max_chars and parts[-1] and size + len(sec[1]) > max_chars:
+                parts.append([])
+                size = 0
+            parts[-1].append(sec)
+            size += len(sec[1])
+
+        for i, part in enumerate(parts, start=1):
+            suffix = f"-{i}" if len(parts) > 1 else ""
+            part_note = f" (part {i}/{len(parts)})" if len(parts) > 1 else ""
+            doc = [header[0] + part_note] + header[1:]
+            doc.append("## Contents\n")
+            for c, _ in part:
+                doc.append(f"- [{c['title']}](#{anchor[c['uuid']]}) — {c['created_at'][:10]}")
+            doc.append("")
+            doc.extend(text for _, text in part)
+            doc_path = out_dir / f"{pslug}{suffix}.md"
+            content = "\n".join(doc) + "\n"
+            doc_path.write_text(content)
+            kb_size = max(1, len(content) // 1024)
+            warn = f"  ⚠ {len(missing)} brief(s) missing" if missing and i == 1 else ""
+            index.append(f"- [{proj['name']}{part_note}]({pslug}{suffix}.md) — "
+                         f"{len(part)} chats, {kb_size} KB{warn}")
+            print(f"Assembled {proj['name']}{part_note}: {doc_path} ({kb_size} KB)"
+                  + (f"  (⚠ {len(missing)} briefs missing)" if missing and i == 1 else ""))
+            if max_chars and len(content) > max_chars:
+                print(f"  ⚠ {doc_path.name} still exceeds --max-chars "
+                      f"({len(content)} > {max_chars}): a single chat brief is "
+                      "bigger than the budget.")
 
         # Memory block: fresh cross-chat synthesis (if generated) first, then
         # the export's curated memory, then the folded-chat index.
@@ -514,10 +976,17 @@ def cmd_assemble(args) -> None:
             mem.append(f"- {c['title']} ({c['created_at'][:10]})")
         (out_dir / f"{pslug}.memory.md").write_text("\n".join(mem) + "\n")
 
-        index.append(f"- [{proj['name']}]({pslug}.md) — {len(proj['chats'])} chats"
-                     + (f"  ⚠ {len(missing)} brief(s) missing" if missing else ""))
-        print(f"Assembled {proj['name']}: {doc_path}"
-              + (f"  (⚠ {len(missing)} briefs missing)" if missing else ""))
+    # Portable persona: a global "about me / how to work with me" block
+    # synthesized by Claude Code (prompts/persona.md) into work/_persona.md.
+    persona_src = work / "_persona.md"
+    if persona_src.exists():
+        text = persona_src.read_text().strip() + "\n"
+        (out_dir / "persona.md").write_text(text)
+        words = len(text.split())
+        index.append(f"- [persona.md](persona.md) — {words} words")
+        print(f"Persona: {out_dir / 'persona.md'} ({words} words)"
+              + ("  ⚠ long for a preferences field — consider trimming to ~500 words"
+                 if words > 800 else ""))
 
     (out_dir / "index.md").write_text("\n".join(index) + "\n")
     print(f"Index: {out_dir / 'index.md'}")
@@ -533,11 +1002,26 @@ def main() -> None:
     p_list.add_argument("--out", help="write to file instead of stdout")
     p_list.set_defaults(func=cmd_list)
 
+    p_exp = sub.add_parser("export", help="write the canonical format (FORMAT.md)")
+    p_exp.add_argument("--export", required=True)
+    p_exp.add_argument("--out", default="canonical")
+    p_exp.add_argument("--markdown", action="store_true",
+                       help="also write a per-chat Markdown archive")
+    p_exp.set_defaults(func=cmd_export)
+
     p_map = sub.add_parser("build-map", help="build map.json from project_listings/*.md")
     p_map.add_argument("--export", required=True)
     p_map.add_argument("--listings", default="project_listings")
     p_map.add_argument("--out", default="map.json")
     p_map.set_defaults(func=cmd_build_map)
+
+    p_pm = sub.add_parser("propose-map",
+                          help="draft map.json by scoring chats against export projects")
+    p_pm.add_argument("--export", required=True)
+    p_pm.add_argument("--out", default="map.draft.json")
+    p_pm.add_argument("--min-score", type=float, default=0.05,
+                      help="below this cosine score a chat stays unassigned")
+    p_pm.set_defaults(func=cmd_propose_map)
 
     p_prep = sub.add_parser("prepare", help="extract transcript bundles per project")
     p_prep.add_argument("--export", required=True)
@@ -545,9 +1029,41 @@ def main() -> None:
     p_prep.add_argument("--out", default="work")
     p_prep.set_defaults(func=cmd_prepare)
 
+    p_reh = sub.add_parser("rehydrate",
+                           help="extract (and optionally run) document-generator "
+                                "scripts to recover generated files")
+    p_reh.add_argument("--export", required=True)
+    p_reh.add_argument("--out", default="rehydrated")
+    p_reh.add_argument("--run", action="store_true",
+                       help="execute the scripts (default: extract only)")
+    p_reh.add_argument("--timeout", type=int, default=120,
+                       help="per-script timeout in seconds with --run")
+    p_reh.set_defaults(func=cmd_rehydrate)
+
+    p_res = sub.add_parser("resume",
+                           help="write resume-primers for recently active threads")
+    p_res.add_argument("--export", required=True)
+    p_res.add_argument("--days", type=int, default=14,
+                       help="active = updated within this many days of the "
+                            "export's newest activity")
+    p_res.add_argument("--tail", type=int, default=8,
+                       help="how many trailing messages to include")
+    p_res.add_argument("--out", default="resume")
+    p_res.set_defaults(func=cmd_resume)
+
+    p_scrub = sub.add_parser("scrub",
+                             help="scan prepared transcripts for secrets/PII")
+    p_scrub.add_argument("--work", default="work")
+    p_scrub.add_argument("--apply", action="store_true",
+                         help="redact matches in place (default: report only)")
+    p_scrub.set_defaults(func=cmd_scrub)
+
     p_asm = sub.add_parser("assemble", help="combine briefs into docs + memory blocks")
     p_asm.add_argument("--work", default="work")
     p_asm.add_argument("--out", default="out")
+    p_asm.add_argument("--max-chars", type=int, default=0, dest="max_chars",
+                       help="split knowledge docs that exceed this many characters "
+                            "(0 = never split; sizes are always reported)")
     p_asm.set_defaults(func=cmd_assemble)
 
     args = parser.parse_args()
