@@ -10,6 +10,9 @@ to upload it. Two things it does:
    See **[MIGRATE.md](MIGRATE.md)** for the step-by-step guide. *(Requires
    [Claude Code](https://claude.com/claude-code), which does the summarizing.)*
 
+![The Chronicle viewer showing a threaded conversation with a rendered HTML artifact](docs/screenshot.png)
+*The standalone viewer: a sample Claude export with a rendered HTML artifact.*
+
 **Just want to see it?** Run `python samples/build_samples.py` to generate two
 fake, UChicago-themed sample exports (Claude + ChatGPT — with chats, a project,
 and artifacts) and drag one into the viewer. See **[samples/](samples/)**.
@@ -245,6 +248,13 @@ viewer (see above); they are not part of the server UI.
 The export itself (`conversations.json`), the generated `conversations.db`, and
 all migration inputs/outputs (`project_listings/`, `map.json`, `work/`, `out/`)
 are git-ignored and not meant to be committed.
+
+## Found a bug?
+
+Open an issue at <https://github.com/kemalbadur/chronicle/issues> — ideally
+with the smallest export snippet that reproduces it (**scrubbed of anything
+personal**; `samples/build_samples.py` shows the shape of a safe fake export).
+Pull requests run the test suite and viewer-freshness check automatically.
 
 ## Development
 

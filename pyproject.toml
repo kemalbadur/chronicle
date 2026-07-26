@@ -7,6 +7,10 @@ requires-python = ">=3.11"
 license = { file = "LICENSE" }
 dependencies = []  # core (synopsis.py, build_index.py, build_standalone.py) is stdlib-only
 
+[project.urls]
+Repository = "https://github.com/kemalbadur/chronicle"
+Issues = "https://github.com/kemalbadur/chronicle/issues"
+
 [project.optional-dependencies]
 server = ["flask>=3.0"]      # app.py
 docs = ["python-docx>=1.1"]  # build_userguide.py
