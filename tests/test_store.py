@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
 import pytest
 from conftest import search_corpus
@@ -13,12 +14,17 @@ from samples.build_samples import CLAUDE_CONVERSATIONS
 
 
 @pytest.fixture(scope="module")
-def db(tmp_path_factory):
+def db_path(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("store")
     src = tmp / "conversations.json"
     src.write_text(json.dumps(search_corpus() + CLAUDE_CONVERSATIONS))
     build(src, tmp / "conversations.db")
-    return store.connect(tmp / "conversations.db")
+    return tmp / "conversations.db"
+
+
+@pytest.fixture(scope="module")
+def db(db_path):
+    return store.connect(db_path)
 
 
 def test_collect_artifacts_dedupes_versions():
@@ -96,3 +102,30 @@ def test_mcp_server_registers_tools(tmp_path, monkeypatch):
     tools = asyncio.run(mcp_server.mcp.list_tools())
     assert {t.name for t in tools} == {"search", "list_conversations", "get_conversation",
                                        "list_artifacts", "get_artifact", "stats"}
+
+
+def test_mcp_tools_survive_concurrent_calls(db_path, monkeypatch):
+    """MCPServer runs sync tools on anyio worker threads, and concurrent calls land
+    on different ones — so the cached connection must not be thread-bound."""
+    pytest.importorskip("mcp")
+    import mcp_server
+    monkeypatch.setattr(mcp_server, "DB_PATH", db_path)
+    monkeypatch.setattr(mcp_server, "_local", threading.local())
+
+    async def hammer():
+        return await asyncio.gather(
+            *(mcp_server.mcp.call_tool("stats", {}) for _ in range(12))
+        )
+
+    for result in asyncio.run(hammer()):
+        assert json.loads(result.content[0].text)["conversations"] == 6
+
+
+def test_mcp_server_missing_db_exits_with_message(tmp_path, monkeypatch):
+    """A missing index should fail at startup, not inside the first tool call."""
+    pytest.importorskip("mcp")
+    import mcp_server
+    monkeypatch.setattr(mcp_server, "DB_PATH", tmp_path / "nope.db")
+    monkeypatch.setattr(mcp_server, "_local", threading.local())
+    with pytest.raises(FileNotFoundError, match="Run: python build_index.py"):
+        mcp_server.db()
