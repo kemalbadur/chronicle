@@ -178,7 +178,11 @@ def docgen_zip(tmp_path):
     a comment), one that fails on a missing import."""
     good = ("# report built with reportlab style\nimport os\n"
             "open('out.pdf', 'w').write('fake pdf')\n")
-    bad = "from docx import Document\nDocument().save('x.docx')\n"
+    # The `from docx import` line is what DOCGEN matches on, so it has to stay;
+    # the second import is one that can never resolve, so the script fails whether
+    # or not python-docx is installed (the `docs` extra provides it).
+    bad = ("from docx import Document\nimport chronicle_no_such_pkg\n"
+           "Document().save('x.docx')\n")
     conv = {
         "uuid": "dddddddd-0000-4000-8000-000000000004", "name": "Doc chats",
         "created_at": "2026-05-01T00:00:00Z", "updated_at": "2026-05-01T00:00:00Z",
