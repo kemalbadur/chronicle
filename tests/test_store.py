@@ -1,6 +1,7 @@
 """store.py query layer + the artifacts table, over a freshly built index."""
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -92,6 +93,6 @@ def test_stats(db):
 def test_mcp_server_registers_tools(tmp_path, monkeypatch):
     pytest.importorskip("mcp")
     import mcp_server
-    names = {t.name for t in mcp_server.mcp._tool_manager.list_tools()}
-    assert names == {"search", "list_conversations", "get_conversation",
-                     "list_artifacts", "get_artifact", "stats"}
+    tools = asyncio.run(mcp_server.mcp.list_tools())
+    assert {t.name for t in tools} == {"search", "list_conversations", "get_conversation",
+                                       "list_artifacts", "get_artifact", "stats"}

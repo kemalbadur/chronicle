@@ -14,8 +14,8 @@ Issues = "https://github.com/kemalbadur/chronicle/issues"
 [project.optional-dependencies]
 server = ["flask>=3.0"]      # app.py
 docs = ["python-docx>=1.1"]  # build_userguide.py
-mcp = ["mcp>=1.2"]           # mcp_server.py
-dev = ["pytest>=8.0", "ruff>=0.5", "mcp>=1.2"]
+mcp = ["mcp>=2.0"]           # mcp_server.py (2.0 renamed FastMCP -> MCPServer)
+dev = ["pytest>=8.0", "ruff>=0.5", "mcp>=2.0"]
 
 [build-system]
 requires = ["setuptools>=61"]

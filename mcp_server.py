@@ -25,12 +25,12 @@ import json
 import sys
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
 import store
 
 DB_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).parent / "conversations.db"
-mcp = FastMCP(
+mcp = MCPServer(
     "chronicle",
     instructions="Searchable archive of the user's past AI conversations "
     "(a Claude or ChatGPT history export). Use `search` to find relevant "
