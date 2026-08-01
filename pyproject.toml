@@ -3,7 +3,7 @@ name = "chronicle"
 version = "0.1.0"
 description = "Local viewer + migration toolkit for Claude/ChatGPT exports"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 license = { file = "LICENSE" }
 dependencies = []  # core (synopsis.py, build_index.py, build_standalone.py) is stdlib-only
 
@@ -27,7 +27,7 @@ py-modules = ["app", "build_index", "build_standalone", "build_userguide",
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py314"
 extend-exclude = ["migration_full", "project_listings"]
 
 [tool.ruff.lint]

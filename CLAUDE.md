@@ -1,7 +1,7 @@
 # Chronicle — project context
 
 Local-first viewer + migration toolkit for Claude/ChatGPT chat exports.
-Python 3.11+, stdlib-only core; 4-space indentation, ruff (line length 100),
+Python 3.14+, stdlib-only core; 4-space indentation, ruff (line length 100),
 pytest. Dev setup: `pip install -e ".[server,docs,dev]"` then `python -m pytest`.
 
 ## Gotchas and contracts
