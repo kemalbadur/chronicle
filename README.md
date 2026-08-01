@@ -2,13 +2,15 @@
 
 A local toolkit for your exported **Claude** or **ChatGPT** history. Everything
 runs on your own machine — your data never leaves your device unless you choose
-to upload it. Two things it does:
+to upload it. Three things it does:
 
 1. **View** — a threaded, full-text-searchable viewer for browsing your export.
 2. **Migrate** — turn your history into per-project knowledge documents +
    memory blocks you can load into **Claude Enterprise** (or anywhere else).
    See **[MIGRATE.md](MIGRATE.md)** for the step-by-step guide. *(Requires
    [Claude Code](https://claude.com/claude-code), which does the summarizing.)*
+3. **Serve** — expose the archive to Claude Desktop or Claude Code over **MCP**,
+   so your past conversations are searchable from inside a new one.
 
 ![The Chronicle viewer showing a threaded conversation with a rendered HTML artifact](docs/screenshot.png)
 *The standalone viewer: a sample Claude export with a rendered HTML artifact.*
@@ -171,20 +173,80 @@ it. *(Requires [Claude Code](https://claude.com/claude-code).)*
 
 ## MCP server: your archive as live memory
 
-Instead of only migrating summaries, you can serve the full indexed history
-to any MCP client (Claude Desktop, Claude Code, ...) — everything stays on
-your machine:
+The migration pipeline above turns your history into *summaries*. This does the
+opposite: it serves the **full** indexed history to any MCP client — Claude
+Desktop, Claude Code, or anything else that speaks MCP — so you can ask about
+past conversations from inside a new one instead of digging them up yourself.
+
+Everything stays on your machine. The server speaks stdio to your client and
+reads a local SQLite file; it makes no network requests, and it opens the
+database **read-only**, so a client can never alter or delete your history
+through it.
+
+### Setup
 
 ```sh
 pip install ".[mcp]"
-python build_index.py        # builds conversations.db from conversations.json
-python mcp_server.py         # stdio MCP server over the database
+python build_index.py        # conversations.json -> conversations.db (SQLite + FTS5)
+python mcp_server.py         # stdio MCP server over that database
 ```
 
-Tools exposed: `search` (full-text, ranked, covers artifact and attachment
-content), `list_conversations`, `get_conversation` (Markdown transcript),
-`list_artifacts` / `get_artifact`, `stats`. Client config snippet is in
-`mcp_server.py`'s docstring.
+Both scripts take optional paths — `build_index.py <export.json> <out.db>` and
+`mcp_server.py <database.db>`, defaulting to `conversations.json` and
+`conversations.db`. The server reads the *database*, not the export, so re-run
+`build_index.py` whenever you download a fresh export.
+
+**ChatGPT exports** need one conversion first, since `build_index.py` expects
+the canonical schema:
+
+```sh
+python synopsis.py export --export chatgpt-export.zip --out work/
+python build_index.py work/conversations.json conversations.db
+```
+
+### Connecting a client
+
+Add this to your client's MCP config — `claude_desktop_config.json` for Claude
+Desktop, or `.mcp.json` (or `claude mcp add`) for Claude Code. The same snippet
+lives in `mcp_server.py`'s docstring:
+
+```json
+{
+  "mcpServers": {
+    "chronicle": {
+      "command": "python",
+      "args": ["/path/to/chronicle/mcp_server.py",
+               "/path/to/chronicle/conversations.db"]
+    }
+  }
+}
+```
+
+Use absolute paths, and make sure `command` points at a Python that has the
+`mcp` package installed — the full path to your virtualenv's interpreter
+(`/path/to/chronicle/.venv/bin/python`) is the reliable choice. If the database
+is missing, the server exits at startup with a message telling you to run
+`build_index.py`, rather than launching and then failing on the first query.
+
+### Tools exposed
+
+| Tool | What it does |
+|---|---|
+| `search(query, limit=20)` | Full-text search across message bodies, thinking blocks, attachment text, and the content of artifacts and files Claude created. Returns conversations ranked by hit count, each with a snippet (`[]` marks the match). |
+| `list_conversations(limit=50, since="", sort="updated")` | Browse conversations. `sort` is `updated` / `created` / `name`; `since` is an ISO date filtered on `updated_at`. |
+| `get_conversation(uuid, include_thinking=False)` | One conversation as a Markdown transcript, optionally including Claude's thinking. |
+| `list_artifacts(query="", limit=50)` | Artifacts and files Claude created, newest first; `query` filters on title, type, or content. Returns the keys `get_artifact` takes. |
+| `get_artifact(key)` | The full content of a single artifact or created file. |
+| `stats()` | Archive totals: conversations, messages, artifacts, and date range. |
+
+The intended flow is `search` to find something, then `get_conversation` to read
+it — which is what the server tells the model in its instructions. Once it's
+connected, *"search my Chronicle archive for what I decided about X"* is enough
+to get going.
+
+All six tools are thin wrappers over `store.py`, the read-only query layer over
+`conversations.db` (see the Files table below) — so adding a tool is usually a
+few lines rather than new SQL.
 
 ---
 
