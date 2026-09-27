@@ -17,6 +17,9 @@ all-chats.md
 chats.md
 migration_*/
 
+# Local dev environment
+.venv/
+
 # Generated artifacts (regenerable from source)
 Chronicle - User Guide.docx
 __pycache__/

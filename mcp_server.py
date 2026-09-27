@@ -23,27 +23,36 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
 import store
 
 DB_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).parent / "conversations.db"
-mcp = FastMCP(
+mcp = MCPServer(
     "chronicle",
     instructions="Searchable archive of the user's past AI conversations "
     "(a Claude or ChatGPT history export). Use `search` to find relevant "
     "conversations, then `get_conversation` to read one.",
 )
-_db = None
+_local = threading.local()
 
 
 def db():
-    global _db
-    if _db is None:
-        _db = store.connect(DB_PATH)
-    return _db
+    """One read-only connection per thread.
+
+    MCPServer runs these sync tools on anyio worker threads, and concurrent calls
+    land on different ones. A single shared connection doesn't work: sqlite3 binds
+    a connection to its creating thread, and even with check_same_thread=False the
+    per-connection statement cache lets two threads running the same SQL consume
+    each other's rows.
+    """
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        conn = _local.conn = store.connect(DB_PATH)
+    return conn
 
 
 @mcp.tool()
@@ -94,4 +103,10 @@ def stats() -> str:
 
 
 if __name__ == "__main__":
+    try:
+        # Probe now, so a missing index fails here instead of inside a tool call.
+        # Discarded: each worker thread opens its own connection via db().
+        store.connect(DB_PATH).close()
+    except FileNotFoundError as e:
+        sys.exit(f"chronicle: {e}")
     mcp.run()

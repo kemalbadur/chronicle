@@ -8,7 +8,7 @@ Code — nothing is uploaded until *you* import it.
 ## What you need
 
 - **Claude Code** (this does the summarizing — required)
-- **Python 3.11+**
+- **Python 3.14+**
 - Your **data export** (`.zip`) from Claude and/or ChatGPT
 - This repo (`git clone …`)
 

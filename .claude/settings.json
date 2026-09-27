@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(. .venv/bin/activate)",
+      "Bash(source .venv/bin/activate)",
+      "Bash(python -m pytest *)",
+      "Bash(ruff check *)",
+      "Bash(node --check *)"
+    ]
+  }
+}

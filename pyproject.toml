@@ -3,7 +3,7 @@ name = "chronicle"
 version = "0.1.0"
 description = "Local viewer + migration toolkit for Claude/ChatGPT exports"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 license = { file = "LICENSE" }
 dependencies = []  # core (synopsis.py, build_index.py, build_standalone.py) is stdlib-only
 
@@ -14,8 +14,8 @@ Issues = "https://github.com/kemalbadur/chronicle/issues"
 [project.optional-dependencies]
 server = ["flask>=3.0"]      # app.py
 docs = ["python-docx>=1.1"]  # build_userguide.py
-mcp = ["mcp>=1.2"]           # mcp_server.py
-dev = ["pytest>=8.0", "ruff>=0.5", "mcp>=1.2"]
+mcp = ["mcp>=2.0"]           # mcp_server.py (2.0 renamed FastMCP -> MCPServer)
+dev = ["pytest>=8.0", "ruff>=0.5", "mcp>=2.0"]
 
 [build-system]
 requires = ["setuptools>=61"]
@@ -27,7 +27,7 @@ py-modules = ["app", "build_index", "build_standalone", "build_userguide",
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py314"
 extend-exclude = ["migration_full", "project_listings"]
 
 [tool.ruff.lint]
